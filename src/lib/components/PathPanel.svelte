@@ -3,13 +3,21 @@
 	import { pathResult, nodes, loadingNodeId, unloadingNodeId } from '$lib/stores';
 	import type { MineNode } from '$lib/types';
 
-	const loadingNode = derived(loadingNodeId, ($id) => {
-		const $nodes = get(nodes);
+	const loadingNodes = derived<typeof nodes, MineNode[]>(
+		nodes,
+		($nodes) => $nodes.filter((n: MineNode) => n.type === 'loading')
+	);
+
+	const unloadingNodes = derived<typeof nodes, MineNode[]>(
+		nodes,
+		($nodes) => $nodes.filter((n: MineNode) => n.type === 'unloading')
+	);
+
+	const loadingNode = derived([loadingNodeId, nodes], ([$id, $nodes]) => {
 		return $nodes.find((n: MineNode) => n.id === $id);
 	});
 
-	const unloadingNode = derived(unloadingNodeId, ($id) => {
-		const $nodes = get(nodes);
+	const unloadingNode = derived([unloadingNodeId, nodes], ([$id, $nodes]) => {
 		return $nodes.find((n: MineNode) => n.id === $id);
 	});
 
@@ -17,19 +25,58 @@
 		const node = get(nodes).find((n: MineNode) => n.id === nodeId);
 		return node?.label || nodeId;
 	}
+
+	function handleLoadingChange(e: Event) {
+		const target = e.target as HTMLSelectElement;
+		loadingNodeId.set(target.value);
+	}
+
+	function handleUnloadingChange(e: Event) {
+		const target = e.target as HTMLSelectElement;
+		unloadingNodeId.set(target.value);
+	}
 </script>
 
 <div class="card p-4 space-y-3">
 	<h3 class="text-lg font-bold text-primary-900">路径信息</h3>
 
-	<div class="text-sm space-y-1">
-		<div class="flex justify-between">
-			<span class="text-tertiary-600">装载点:</span>
-			<span class="font-medium text-green-600">{$loadingNode?.label || '未设置'}</span>
+	<div class="space-y-2">
+		<div>
+			<label for="loadingSelect" class="label text-sm">装载点</label>
+			<select
+				id="loadingSelect"
+				class="select"
+				value={$loadingNodeId}
+				on:change={handleLoadingChange}
+				disabled={$loadingNodes.length === 0}
+			>
+				{#if $loadingNodes.length === 0}
+					<option value="">暂无装载点</option>
+				{:else}
+					{#each $loadingNodes as node (node.id)}
+						<option value={node.id}>{node.label}</option>
+					{/each}
+				{/if}
+			</select>
 		</div>
-		<div class="flex justify-between">
-			<span class="text-tertiary-600">卸载点:</span>
-			<span class="font-medium text-blue-600">{$unloadingNode?.label || '未设置'}</span>
+
+		<div>
+			<label for="unloadingSelect" class="label text-sm">卸载点</label>
+			<select
+				id="unloadingSelect"
+				class="select"
+				value={$unloadingNodeId}
+				on:change={handleUnloadingChange}
+				disabled={$unloadingNodes.length === 0}
+			>
+				{#if $unloadingNodes.length === 0}
+					<option value="">暂无卸载点</option>
+				{:else}
+					{#each $unloadingNodes as node (node.id)}
+						<option value={node.id}>{node.label}</option>
+					{/each}
+				{/if}
+			</select>
 		</div>
 	</div>
 

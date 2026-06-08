@@ -3,10 +3,9 @@
 	import { nodes, selectedNodeId, deleteNode, updateNode, isLabelDuplicate, loadingNodeId, unloadingNodeId } from '$lib/stores';
 	import type { NodeType, MineNode } from '$lib/types';
 
-	const selectedNode = derived<typeof selectedNodeId, MineNode | null>(
-		selectedNodeId,
-		($id) => {
-			const $nodes = get(nodes);
+	const selectedNode = derived<[typeof selectedNodeId, typeof nodes], MineNode | null>(
+		[selectedNodeId, nodes],
+		([$id, $nodes]) => {
 			return $nodes.find((n) => n.id === $id) || null;
 		}
 	);
@@ -15,42 +14,44 @@
 	let editType: NodeType = 'normal';
 	let editBlocked = false;
 	let labelError = '';
+	let isUpdating = false;
 
-	$: if ($selectedNode) {
+	$: if ($selectedNode && !isUpdating) {
 		editLabel = $selectedNode.label;
 		editType = $selectedNode.type;
 		editBlocked = $selectedNode.blocked;
 		labelError = '';
 	}
 
-	function validateLabel() {
+	function handleLabelInput() {
+		if (!$selectedNode) return;
 		if (!editLabel.trim()) {
 			labelError = '节点编号不能为空';
-			return false;
+			return;
 		}
-		if (isLabelDuplicate(editLabel, $selectedNode?.id)) {
+		if (isLabelDuplicate(editLabel, $selectedNode.id)) {
 			labelError = '节点编号不能重复';
-			return false;
+			return;
 		}
 		labelError = '';
-		return true;
+		isUpdating = true;
+		updateNode($selectedNode.id, { label: editLabel });
+		requestAnimationFrame(() => {
+			isUpdating = false;
+		});
 	}
 
 	function handleLabelKeyup(e: KeyboardEvent) {
 		if (e.key === 'Enter') {
-			saveChanges();
+			handleLabelInput();
 		}
 	}
 
-	function saveChanges() {
-		if (!$selectedNode || !validateLabel()) return;
-
+	function handleTypeChange() {
+		if (!$selectedNode) return;
 		const oldType = $selectedNode.type;
-		updateNode($selectedNode.id, {
-			label: editLabel,
-			type: editType,
-			blocked: editBlocked
-		});
+		isUpdating = true;
+		updateNode($selectedNode.id, { type: editType });
 
 		if (oldType !== editType) {
 			if (editType === 'loading') {
@@ -77,6 +78,19 @@
 				}
 			}
 		}
+
+		requestAnimationFrame(() => {
+			isUpdating = false;
+		});
+	}
+
+	function handleBlockedChange() {
+		if (!$selectedNode) return;
+		isUpdating = true;
+		updateNode($selectedNode.id, { blocked: editBlocked });
+		requestAnimationFrame(() => {
+			isUpdating = false;
+		});
 	}
 
 	function handleDelete() {
@@ -106,7 +120,7 @@
 					type="text"
 					class="input {labelError ? 'input-error' : ''}"
 					bind:value={editLabel}
-					on:blur={validateLabel}
+					on:input={handleLabelInput}
 					on:keyup={handleLabelKeyup}
 				/>
 				{#if labelError}
@@ -116,7 +130,7 @@
 
 			<div>
 				<label for="nodeType" class="label">节点类型</label>
-				<select id="nodeType" class="select" bind:value={editType}>
+				<select id="nodeType" class="select" bind:value={editType} on:change={handleTypeChange}>
 					{#each typeOptions as opt}
 						<option value={opt.value}>{opt.label}</option>
 					{/each}
@@ -124,18 +138,13 @@
 			</div>
 
 			<div class="flex items-center gap-2">
-				<input type="checkbox" class="checkbox" id="blocked" bind:checked={editBlocked} />
+				<input type="checkbox" class="checkbox" id="blocked" bind:checked={editBlocked} on:change={handleBlockedChange} />
 				<label for="blocked" class="label cursor-pointer">标记为堵塞</label>
 			</div>
 
-			<div class="flex gap-2">
-				<button class="btn btn-sm variant-filled-primary flex-1" on:click={saveChanges}>
-					保存
-				</button>
-				<button class="btn btn-sm variant-filled-error" on:click={handleDelete}>
-					删除
-				</button>
-			</div>
+			<button class="btn btn-sm variant-filled-error w-full" on:click={handleDelete}>
+				删除节点
+			</button>
 		</div>
 	{:else}
 		<p class="text-sm text-tertiary-500">点击选择一个节点进行编辑</p>

@@ -9,11 +9,9 @@
 		targetLabel: string;
 	}
 
-	const selectedEdge = derived<typeof selectedEdgeId, SelectedEdgeInfo | null>(
-		selectedEdgeId,
-		($id) => {
-			const $edges = get(edges);
-			const $nodes = get(nodes);
+	const selectedEdge = derived<[typeof selectedEdgeId, typeof edges, typeof nodes], SelectedEdgeInfo | null>(
+		[selectedEdgeId, edges, nodes],
+		([$id, $edges, $nodes]) => {
 			const edge = $edges.find((e: MineEdge) => e.id === $id);
 			if (!edge) return null;
 			const source = $nodes.find((n: MineNode) => n.id === edge.source);
@@ -28,26 +26,25 @@
 
 	let editLength = 50;
 	let lengthError = '';
+	let isUpdating = false;
 
-	$: if ($selectedEdge) {
+	$: if ($selectedEdge && !isUpdating) {
 		editLength = $selectedEdge.edge.length;
 		lengthError = '';
 	}
 
-	function validateLength() {
+	function handleLengthInput() {
+		if (!$selectedEdge) return;
 		const val = Number(editLength);
 		if (isNaN(val) || val <= 0) {
 			lengthError = '轨道长度必须大于 0';
-			return false;
+			return;
 		}
 		lengthError = '';
-		return true;
-	}
-
-	function saveChanges() {
-		if (!$selectedEdge || !validateLength()) return;
-		updateEdge($selectedEdge.edge.id, {
-			length: Number(editLength)
+		isUpdating = true;
+		updateEdge($selectedEdge.edge.id, { length: val });
+		requestAnimationFrame(() => {
+			isUpdating = false;
 		});
 	}
 
@@ -95,8 +92,8 @@
 					type="number"
 					class="input {lengthError ? 'input-error' : ''}"
 					bind:value={editLength}
+					on:input={handleLengthInput}
 					min="1"
-					on:blur={validateLength}
 				/>
 				{#if lengthError}
 					<p class="text-xs text-error-500 mt-1">{lengthError}</p>
@@ -147,14 +144,9 @@
 				</div>
 			{/if}
 
-			<div class="flex gap-2">
-				<button class="btn btn-sm variant-filled-primary flex-1" on:click={saveChanges}>
-					保存
-				</button>
-				<button class="btn btn-sm variant-filled-error" on:click={handleDelete}>
-					删除
-				</button>
-			</div>
+			<button class="btn btn-sm variant-filled-error w-full" on:click={handleDelete}>
+				删除轨道
+			</button>
 		</div>
 	{:else}
 		<p class="text-sm text-tertiary-500">点击选择一条轨道进行编辑</p>
