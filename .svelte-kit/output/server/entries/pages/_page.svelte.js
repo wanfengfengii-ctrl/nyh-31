@@ -143,68 +143,9 @@ function createConflictId() {
 function getEdgeById(edges2, edgeId) {
   return edges2.find((e) => e.id === edgeId);
 }
-function getNodeById(nodes2, nodeId) {
-  return nodes2.find((n) => n.id === nodeId);
-}
 function calculateTravelTime(length, speed) {
   if (speed <= 0) return Infinity;
   return length / speed;
-}
-function buildTimedRoute(nodes2, edges2, cart) {
-  const pathResult2 = calculateShortestPath(nodes2, edges2, cart.sourceId, cart.targetId);
-  if (!pathResult2.hasPath) {
-    return {
-      cartId: cart.id,
-      cartName: cart.name,
-      positions: [],
-      totalDistance: 0,
-      totalTime: 0,
-      switchCount: 0,
-      hasPath: false,
-      waitTime: 0
-    };
-  }
-  const positions = [];
-  let currentTime = cart.departureTime;
-  const sourceNode = getNodeById(nodes2, cart.sourceId);
-  if (sourceNode) {
-    positions.push({
-      nodeId: cart.sourceId,
-      edgeId: null,
-      arrivalTime: currentTime,
-      departureTime: currentTime,
-      isSwitch: sourceNode.type === "switch"
-    });
-  }
-  for (let i = 0; i < pathResult2.edges.length; i++) {
-    const edgeId = pathResult2.edges[i];
-    const edge = getEdgeById(edges2, edgeId);
-    const nextNodeId = pathResult2.nodes[i + 1];
-    const nextNode = getNodeById(nodes2, nextNodeId);
-    if (edge && nextNode) {
-      const travelTime = calculateTravelTime(edge.length, cart.speed);
-      const arrivalTime = currentTime + travelTime;
-      positions.push({
-        nodeId: nextNodeId,
-        edgeId,
-        arrivalTime,
-        departureTime: arrivalTime,
-        isSwitch: nextNode.type === "switch"
-      });
-      currentTime = arrivalTime;
-    }
-  }
-  const totalTime = positions.length > 0 ? positions[positions.length - 1].arrivalTime - cart.departureTime : 0;
-  return {
-    cartId: cart.id,
-    cartName: cart.name,
-    positions,
-    totalDistance: pathResult2.totalDistance,
-    totalTime,
-    switchCount: pathResult2.switchCount,
-    hasPath: true,
-    waitTime: 0
-  };
 }
 function timeOverlap(start1, end1, start2, end2) {
   return start1 < end2 && start2 < end1;
@@ -338,70 +279,249 @@ function detectSwitchConflicts(route1, route2, cart1, cart2, conflicts) {
     }
   }
 }
-function resolveConflictsWithPriority(routes, conflicts, carts2, nodes2, edges2) {
-  const cartMap = new Map(carts2.map((c) => [c.id, c]));
-  const routeMap = new Map(routes.map((r) => [r.cartId, { ...r, positions: [...r.positions] }]));
-  let unresolvedConflicts = [...conflicts];
-  const maxIterations = 20;
-  for (let iteration = 0; iteration < maxIterations && unresolvedConflicts.length > 0; iteration++) {
-    const newConflicts = [];
-    for (const conflict of unresolvedConflicts) {
-      const cart1 = cartMap.get(conflict.cart1Id);
-      const cart2 = cartMap.get(conflict.cart2Id);
-      if (!cart1 || !cart2) continue;
-      const lowerPriorityCart = cart1.priority <= cart2.priority ? cart2 : cart1;
-      const higherPriorityCart = cart1.priority <= cart2.priority ? cart1 : cart2;
-      const lowerRoute = routeMap.get(lowerPriorityCart.id);
-      const higherRoute = routeMap.get(higherPriorityCart.id);
-      if (!lowerRoute || !higherRoute || !lowerRoute.hasPath) continue;
-      const waitTime = conflict.endTime - conflict.startTime + 2;
-      const originalDeparture = lowerPriorityCart.departureTime;
-      if (iteration > 0) {
-        const firstPos = lowerRoute.positions[0];
-        if (firstPos) {
-          firstPos.departureTime - originalDeparture + waitTime;
-        }
-      }
-      lowerRoute.positions = lowerRoute.positions.map((pos, idx) => ({
-        ...pos,
-        arrivalTime: pos.arrivalTime + waitTime,
-        departureTime: idx === 0 ? pos.departureTime + waitTime : pos.departureTime + waitTime
-      }));
-      lowerRoute.waitTime += waitTime;
-      lowerRoute.totalTime += waitTime;
+function createOccupancyTable() {
+  return {
+    edgeOccupancies: /* @__PURE__ */ new Map(),
+    nodeOccupancies: /* @__PURE__ */ new Map()
+  };
+}
+function addEdgeOccupancy(table, edgeId, start, end, cartId) {
+  if (!table.edgeOccupancies.has(edgeId)) {
+    table.edgeOccupancies.set(edgeId, []);
+  }
+  table.edgeOccupancies.get(edgeId).push({ start, end, cartId });
+  table.edgeOccupancies.get(edgeId).sort((a, b) => a.start - b.start);
+}
+function addNodeOccupancy(table, nodeId, start, end, cartId) {
+  if (!table.nodeOccupancies.has(nodeId)) {
+    table.nodeOccupancies.set(nodeId, []);
+  }
+  table.nodeOccupancies.get(nodeId).push({ start, end, cartId });
+  table.nodeOccupancies.get(nodeId).sort((a, b) => a.start - b.start);
+}
+function findEarliestAvailableTime(occupancies, desiredStart, duration, buffer = 0.5) {
+  if (!occupancies || occupancies.length === 0) {
+    return desiredStart;
+  }
+  let earliestStart = desiredStart;
+  for (const occ of occupancies) {
+    const occStart = occ.start - buffer;
+    const occEnd = occ.end + buffer;
+    if (earliestStart + duration <= occStart) {
+      return earliestStart;
     }
-    const updatedRoutes = Array.from(routeMap.values());
-    newConflicts.push(...detectConflicts(updatedRoutes, edges2, carts2));
-    if (newConflicts.length === 0) {
-      unresolvedConflicts = [];
-      break;
-    } else if (newConflicts.length < unresolvedConflicts.length) {
-      unresolvedConflicts = newConflicts;
-    } else {
-      break;
+    if (earliestStart < occEnd) {
+      earliestStart = occEnd;
+    }
+  }
+  return earliestStart;
+}
+function buildAdjacencyList(nodes2, edges2) {
+  const adjacency = /* @__PURE__ */ new Map();
+  nodes2.forEach((n) => adjacency.set(n.id, []));
+  edges2.forEach((edge) => {
+    if (!edge.enabled) return;
+    if (edge.isSwitch && !edge.switchActive) return;
+    const sourceNode = nodes2.find((n) => n.id === edge.source);
+    const targetNode = nodes2.find((n) => n.id === edge.target);
+    if (!sourceNode || !targetNode) return;
+    if (sourceNode.blocked || targetNode.blocked) return;
+    adjacency.get(edge.source)?.push({
+      nodeId: edge.target,
+      edgeId: edge.id,
+      length: edge.length,
+      isSwitch: edge.isSwitch
+    });
+    adjacency.get(edge.target)?.push({
+      nodeId: edge.source,
+      edgeId: edge.id,
+      length: edge.length,
+      isSwitch: edge.isSwitch
+    });
+  });
+  return adjacency;
+}
+function findTimeWindowPath(nodes2, edges2, cart, occupancyTable) {
+  const adjacency = buildAdjacencyList(nodes2, edges2);
+  const nodeMap = new Map(nodes2.map((n) => [n.id, n]));
+  const nodeBuffer = 0.5;
+  const edgeBuffer = 0.3;
+  const distances = /* @__PURE__ */ new Map();
+  const previous = /* @__PURE__ */ new Map();
+  const arrivalTimes = /* @__PURE__ */ new Map();
+  const departureTimes = /* @__PURE__ */ new Map();
+  const switchCounts = /* @__PURE__ */ new Map();
+  const totalDistances = /* @__PURE__ */ new Map();
+  nodes2.forEach((n) => {
+    distances.set(n.id, Infinity);
+    arrivalTimes.set(n.id, Infinity);
+    departureTimes.set(n.id, Infinity);
+    switchCounts.set(n.id, 0);
+    totalDistances.set(n.id, 0);
+    previous.set(n.id, null);
+  });
+  const sourceNode = nodeMap.get(cart.sourceId);
+  if (!sourceNode || sourceNode.blocked) {
+    return {
+      cartId: cart.id,
+      cartName: cart.name,
+      positions: [],
+      totalDistance: 0,
+      totalTime: 0,
+      switchCount: 0,
+      hasPath: false,
+      waitTime: 0
+    };
+  }
+  const initialDeparture = findEarliestAvailableTime(
+    occupancyTable.nodeOccupancies.get(cart.sourceId),
+    cart.departureTime,
+    0,
+    nodeBuffer
+  );
+  distances.set(cart.sourceId, 0);
+  arrivalTimes.set(cart.sourceId, initialDeparture);
+  departureTimes.set(cart.sourceId, initialDeparture);
+  switchCounts.set(cart.sourceId, 0);
+  totalDistances.set(cart.sourceId, 0);
+  const visited = /* @__PURE__ */ new Set();
+  while (visited.size < nodes2.length) {
+    let minArrival = Infinity;
+    let currentNode = "";
+    nodes2.forEach((n) => {
+      if (!visited.has(n.id) && (arrivalTimes.get(n.id) ?? Infinity) < minArrival) {
+        minArrival = arrivalTimes.get(n.id) ?? Infinity;
+        currentNode = n.id;
+      }
+    });
+    if (minArrival === Infinity || currentNode === "") break;
+    visited.add(currentNode);
+    if (currentNode === cart.targetId) break;
+    const neighbors = adjacency.get(currentNode) || [];
+    const currentDeparture = departureTimes.get(currentNode) ?? 0;
+    for (const neighbor of neighbors) {
+      if (visited.has(neighbor.nodeId)) continue;
+      const travelTime = calculateTravelTime(neighbor.length, cart.speed);
+      const edgeOccupancies = occupancyTable.edgeOccupancies.get(neighbor.edgeId);
+      const edgeStart = findEarliestAvailableTime(
+        edgeOccupancies,
+        currentDeparture,
+        travelTime,
+        edgeBuffer
+      );
+      const edgeArrival = edgeStart + travelTime;
+      const targetNode = nodeMap.get(neighbor.nodeId);
+      const isSwitchNode = targetNode?.type === "switch";
+      const nodeStayTime = isSwitchNode ? 1 : 0.5;
+      const nodeOccupancies = occupancyTable.nodeOccupancies.get(neighbor.nodeId);
+      const nodeAvailableStart = findEarliestAvailableTime(
+        nodeOccupancies,
+        edgeArrival,
+        nodeStayTime,
+        nodeBuffer
+      );
+      const nodeDeparture = nodeAvailableStart;
+      const newTotalDistance = (totalDistances.get(currentNode) ?? 0) + neighbor.length;
+      const newSwitchCount = (switchCounts.get(currentNode) ?? 0) + (neighbor.isSwitch ? 1 : 0);
+      if (nodeAvailableStart < (arrivalTimes.get(neighbor.nodeId) ?? Infinity)) {
+        arrivalTimes.set(neighbor.nodeId, nodeAvailableStart);
+        departureTimes.set(neighbor.nodeId, nodeDeparture);
+        distances.set(neighbor.nodeId, nodeAvailableStart);
+        switchCounts.set(neighbor.nodeId, newSwitchCount);
+        totalDistances.set(neighbor.nodeId, newTotalDistance);
+        previous.set(neighbor.nodeId, { nodeId: currentNode, edgeId: neighbor.edgeId });
+      }
+    }
+  }
+  const targetArrival = arrivalTimes.get(cart.targetId);
+  if (!targetArrival || targetArrival === Infinity) {
+    return {
+      cartId: cart.id,
+      cartName: cart.name,
+      positions: [],
+      totalDistance: 0,
+      totalTime: 0,
+      switchCount: 0,
+      hasPath: false,
+      waitTime: 0
+    };
+  }
+  const positions = [];
+  let current = cart.targetId;
+  while (current !== cart.sourceId) {
+    const prev = previous.get(current);
+    const node = nodeMap.get(current);
+    if (!prev || !node) break;
+    positions.unshift({
+      nodeId: current,
+      edgeId: prev.edgeId,
+      arrivalTime: arrivalTimes.get(current) ?? 0,
+      departureTime: departureTimes.get(current) ?? 0,
+      isSwitch: node.type === "switch"
+    });
+    current = prev.nodeId;
+  }
+  const sourceNodeObj = nodeMap.get(cart.sourceId);
+  if (sourceNodeObj) {
+    positions.unshift({
+      nodeId: cart.sourceId,
+      edgeId: null,
+      arrivalTime: arrivalTimes.get(cart.sourceId) ?? cart.departureTime,
+      departureTime: departureTimes.get(cart.sourceId) ?? cart.departureTime,
+      isSwitch: sourceNodeObj.type === "switch"
+    });
+  }
+  const totalTime = targetArrival - cart.departureTime;
+  let totalWaitTime = 0;
+  for (let i = 0; i < positions.length; i++) {
+    const pos = positions[i];
+    const wait = pos.departureTime - pos.arrivalTime;
+    if (wait > 0.01) {
+      totalWaitTime += wait;
     }
   }
   return {
-    routes: Array.from(routeMap.values()),
-    conflicts: unresolvedConflicts,
-    resolved: unresolvedConflicts.length === 0
+    cartId: cart.id,
+    cartName: cart.name,
+    positions,
+    totalDistance: totalDistances.get(cart.targetId) ?? 0,
+    totalTime,
+    switchCount: switchCounts.get(cart.targetId) ?? 0,
+    hasPath: true,
+    waitTime: totalWaitTime
   };
+}
+function addRouteToOccupancyTable(table, route, cartId) {
+  const positions = route.positions;
+  if (positions.length < 2) return;
+  for (let i = 0; i < positions.length; i++) {
+    const pos = positions[i];
+    const nodeStayStart = pos.arrivalTime;
+    const nodeStayEnd = pos.departureTime;
+    if (nodeStayEnd > nodeStayStart) {
+      addNodeOccupancy(table, pos.nodeId, nodeStayStart, nodeStayEnd, cartId);
+    }
+    if (i > 0 && pos.edgeId) {
+      const prevPos = positions[i - 1];
+      const edgeStart = prevPos.departureTime;
+      const edgeEnd = pos.arrivalTime;
+      addEdgeOccupancy(table, pos.edgeId, edgeStart, edgeEnd, cartId);
+    }
+  }
 }
 function calculateDispatch(nodes2, edges2, carts2) {
   const sortedCarts = [...carts2].sort((a, b) => b.priority - a.priority);
-  const routes = sortedCarts.map(
-    (cart) => buildTimedRoute(nodes2, edges2, cart)
-  );
-  const initialConflicts = detectConflicts(routes, edges2, carts2);
-  const { routes: resolvedRoutes, conflicts: remainingConflicts } = resolveConflictsWithPriority(
-    routes,
-    initialConflicts,
-    carts2,
-    nodes2,
-    edges2
-  );
+  const occupancyTable = createOccupancyTable();
+  const routes = [];
+  for (const cart of sortedCarts) {
+    const route = findTimeWindowPath(nodes2, edges2, cart, occupancyTable);
+    routes.push(route);
+    if (route.hasPath) {
+      addRouteToOccupancyTable(occupancyTable, route, cart.id);
+    }
+  }
   const finalRoutes = carts2.map((cart) => {
-    const route = resolvedRoutes.find((r) => r.cartId === cart.id);
+    const route = routes.find((r) => r.cartId === cart.id);
     return route || {
       cartId: cart.id,
       cartName: cart.name,
@@ -413,17 +533,21 @@ function calculateDispatch(nodes2, edges2, carts2) {
       waitTime: 0
     };
   });
+  const conflicts = detectConflicts(finalRoutes, edges2, carts2);
   const totalTime = Math.max(...finalRoutes.map((r) => r.positions.length > 0 ? r.positions[r.positions.length - 1].arrivalTime : 0));
   const totalDistance = finalRoutes.reduce((sum, r) => sum + r.totalDistance, 0);
   const totalSwitchCount = finalRoutes.reduce((sum, r) => sum + r.switchCount, 0);
-  const highConflicts = remainingConflicts.filter((c) => c.severity === "high").length;
-  const mediumConflicts = remainingConflicts.filter((c) => c.severity === "medium").length;
-  const lowConflicts = remainingConflicts.filter((c) => c.severity === "low").length;
-  const congestionRisk = Math.min(100, highConflicts * 30 + mediumConflicts * 15 + lowConflicts * 5);
+  const totalWaitTime = finalRoutes.reduce((sum, r) => sum + r.waitTime, 0);
+  const highConflicts = conflicts.filter((c) => c.severity === "high").length;
+  const mediumConflicts = conflicts.filter((c) => c.severity === "medium").length;
+  const lowConflicts = conflicts.filter((c) => c.severity === "low").length;
+  const baseRisk = highConflicts * 30 + mediumConflicts * 15 + lowConflicts * 5;
+  const waitRisk = totalWaitTime > 0 ? Math.min(20, totalWaitTime / 2) : 0;
+  const congestionRisk = Math.min(100, baseRisk + waitRisk);
   const hasAllPaths = finalRoutes.every((r) => r.hasPath);
   return {
     routes: finalRoutes,
-    conflicts: remainingConflicts,
+    conflicts,
     totalTime,
     totalDistance,
     totalSwitchCount,
@@ -499,19 +623,39 @@ const CytoscapeGraph = create_ssr_component(($$result, $$props, $$bindings, slot
   function updatePlaybackCarts(frame) {
     if (!cy) return;
     cy.elements(".cart-node").remove();
+    cy.elements(".cart-wait-ring").remove();
     cy.elements("edge").removeClass("congested");
     if (!frame || frame.cartStates.length === 0) return;
-    const cartElements = frame.cartStates.map((cartState) => ({
-      group: "nodes",
-      data: {
-        id: `cart_${cartState.cartId}`,
-        label: cartState.cartName,
-        cartColor: cartState.color,
-        isCart: true
-      },
-      position: { x: cartState.x, y: cartState.y },
-      classes: "cart-node"
-    }));
+    const cartElements = [];
+    const ringElements = [];
+    frame.cartStates.forEach((cartState) => {
+      const classes = cartState.isWaiting ? "cart-node cart-waiting" : "cart-node";
+      cartElements.push({
+        group: "nodes",
+        data: {
+          id: `cart_${cartState.cartId}`,
+          label: cartState.cartName,
+          cartColor: cartState.color,
+          isCart: true,
+          waitRemaining: cartState.waitRemaining,
+          waitNodeLabel: cartState.waitNodeLabel
+        },
+        position: { x: cartState.x, y: cartState.y },
+        classes
+      });
+      if (cartState.isWaiting) {
+        ringElements.push({
+          group: "nodes",
+          data: {
+            id: `cart_ring_${cartState.cartId}`,
+            cartColor: cartState.color
+          },
+          position: { x: cartState.x, y: cartState.y },
+          classes: "cart-wait-ring"
+        });
+      }
+    });
+    cy.add(ringElements);
     cy.add(cartElements);
     frame.congestedEdges.forEach((congested) => {
       const edge = cy.$id(congested.edgeId);

@@ -243,12 +243,16 @@ export function deleteCart(cartId: string) {
 
 export function saveDispatchScheme(name: string) {
 	const $carts = get(carts);
+	const $nodes = get(nodes);
+	const $edges = get(edges);
 	const now = Date.now();
 
 	const newScheme: DispatchScheme = {
 		id: createDispatchSchemeId(),
 		name,
 		carts: JSON.parse(JSON.stringify($carts)),
+		nodes: JSON.parse(JSON.stringify($nodes)),
+		edges: JSON.parse(JSON.stringify($edges)),
 		createdAt: now,
 		updatedAt: now
 	};
@@ -263,7 +267,14 @@ export function loadDispatchScheme(schemeId: string) {
 	if (!scheme) return;
 
 	carts.set(JSON.parse(JSON.stringify(scheme.carts)));
+	nodes.set(JSON.parse(JSON.stringify(scheme.nodes)));
+	edges.set(JSON.parse(JSON.stringify(scheme.edges)));
 	currentDispatchSchemeName.set(scheme.name);
+
+	const loadingNode = scheme.nodes.find((n) => n.type === 'loading');
+	const unloadingNode = scheme.nodes.find((n) => n.type === 'unloading');
+	if (loadingNode) loadingNodeId.set(loadingNode.id);
+	if (unloadingNode) unloadingNodeId.set(unloadingNode.id);
 }
 
 export function deleteDispatchScheme(schemeId: string) {

@@ -122,26 +122,51 @@
 		}
 	}
 
+	let waitingAnimationTimer: number | null = null;
+	let waitingBlinkState = false;
+
 	function updatePlaybackCarts(frame: PlaybackFrame | null): void {
 		if (!cy) return;
 
 		cy.elements('.cart-node').remove();
+		cy.elements('.cart-wait-ring').remove();
 		cy.elements('edge').removeClass('congested');
 
 		if (!frame || frame.cartStates.length === 0) return;
 
-		const cartElements: ElementDefinition[] = frame.cartStates.map((cartState) => ({
-			group: 'nodes',
-			data: {
-				id: `cart_${cartState.cartId}`,
-				label: cartState.cartName,
-				cartColor: cartState.color,
-				isCart: true
-			},
-			position: { x: cartState.x, y: cartState.y },
-			classes: 'cart-node'
-		}));
+		const cartElements: ElementDefinition[] = [];
+		const ringElements: ElementDefinition[] = [];
 
+		frame.cartStates.forEach((cartState) => {
+			const classes = cartState.isWaiting ? 'cart-node cart-waiting' : 'cart-node';
+			cartElements.push({
+				group: 'nodes',
+				data: {
+					id: `cart_${cartState.cartId}`,
+					label: cartState.cartName,
+					cartColor: cartState.color,
+					isCart: true,
+					waitRemaining: cartState.waitRemaining,
+					waitNodeLabel: cartState.waitNodeLabel
+				},
+				position: { x: cartState.x, y: cartState.y },
+				classes
+			});
+
+			if (cartState.isWaiting) {
+				ringElements.push({
+					group: 'nodes',
+					data: {
+						id: `cart_ring_${cartState.cartId}`,
+						cartColor: cartState.color
+					},
+					position: { x: cartState.x, y: cartState.y },
+					classes: 'cart-wait-ring'
+				});
+			}
+		});
+
+		cy.add(ringElements);
 		cy.add(cartElements);
 
 		frame.congestedEdges.forEach((congested) => {
@@ -244,6 +269,27 @@
 				'text-outline-width': 2,
 				'text-outline-color': '#ffffff',
 				'z-index': 9999
+			}
+		},
+		{
+			selector: 'node.cart-waiting',
+			style: {
+				'border-color': '#f59e0b',
+				'border-width': 3,
+				'z-index': 10000
+			}
+		},
+		{
+			selector: 'node.cart-wait-ring',
+			style: {
+				'background-color': 'transparent',
+				'border-color': 'data(cartColor)',
+				'border-width': 2,
+				'border-style': 'dashed',
+				width: 42,
+				height: 42,
+				'z-index': 9998,
+				opacity: 0.6
 			}
 		}
 	];

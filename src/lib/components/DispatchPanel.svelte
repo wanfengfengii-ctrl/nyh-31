@@ -178,12 +178,12 @@
 
 	$: compareResults = (() => {
 		if (selectedCompareIds.size === 0) return [];
-		const currentNodes = get(nodes);
-		const currentEdges = get(edges);
 		return $dispatchSchemes
 			.filter((s) => selectedCompareIds.has(s.id))
 			.map((scheme) => {
-				const tempResult = calculateDispatch(currentNodes, currentEdges, scheme.carts);
+				const schemeNodes = scheme.nodes || get(nodes);
+				const schemeEdges = scheme.edges || get(edges);
+				const tempResult = calculateDispatch(schemeNodes, schemeEdges, scheme.carts);
 				return {
 					schemeId: scheme.id,
 					schemeName: scheme.name,

@@ -233,29 +233,72 @@
 			<p class="text-sm font-medium text-primary-700 mb-2">
 				当前小车状态 ({currentFrame?.cartStates.length || 0})
 			</p>
-			<div class="space-y-1 max-h-32 overflow-y-auto">
+			<div class="space-y-1.5 max-h-40 overflow-y-auto">
 				{#if currentFrame?.cartStates.length === 0}
 					<p class="text-xs text-tertiary-500 text-center py-2">暂无小车</p>
 				{:else}
 					{#each currentFrame.cartStates as cartState (cartState.cartId)}
-						<div class="flex items-center gap-2 p-1.5 rounded bg-surface-50 text-xs">
-							<div
-								class="w-3 h-3 rounded-full border border-gray-700 flex-shrink-0"
-								style="background-color: {cartState.color}"
-							></div>
-							<span class="font-medium flex-shrink-0">{cartState.cartName}</span>
-							<span class="text-tertiary-500 truncate">
-								{#if cartState.isWaiting}
-									等待中
-								{:else if cartState.nextNodeId}
-									→ {cartState.nextNodeId.slice(0, 6)}
-								{:else}
-									已到达
-								{/if}
-							</span>
-							<span class="text-tertiary-400 ml-auto flex-shrink-0">
-								{(cartState.progress * 100).toFixed(0)}%
-							</span>
+						<div
+							class="p-2 rounded text-xs"
+							class:bg-amber-50={cartState.isWaiting}
+							class:bg-surface-50={!cartState.isWaiting}
+							class:border-l-2={cartState.isWaiting}
+							class:border-l-amber-500={cartState.isWaiting}
+						>
+							<div class="flex items-center gap-2 mb-1">
+								<div
+									class="w-3 h-3 rounded-full border border-gray-700 flex-shrink-0"
+									class:animate-pulse={cartState.isWaiting}
+									style="background-color: {cartState.color}"
+								></div>
+								<span class="font-medium flex-shrink-0">{cartState.cartName}</span>
+								<span
+									class="ml-auto text-xs px-1.5 py-0.5 rounded"
+									class:bg-amber-100={cartState.isWaiting}
+									class:text-amber-700={cartState.isWaiting}
+									class:bg-surface-200={!cartState.isWaiting && cartState.nextNodeId}
+									class:text-tertiary-600={!cartState.isWaiting && cartState.nextNodeId}
+									class:bg-green-100={!cartState.isWaiting && !cartState.nextNodeId}
+									class:text-green-700={!cartState.isWaiting && !cartState.nextNodeId}
+								>
+									{#if cartState.isWaiting}
+										⏳ 等待中
+									{:else if cartState.nextNodeId}
+										🚚 行驶中
+									{:else}
+										✓ 已到达
+									{/if}
+								</span>
+							</div>
+							{#if cartState.isWaiting}
+								<div class="text-xs text-amber-700">
+									在 <span class="font-medium">{cartState.waitNodeLabel}</span> 等待
+								</div>
+								<div class="text-xs text-amber-600 mt-0.5">
+									剩余等待: <span class="font-mono">{cartState.waitRemaining.toFixed(1)}</span> 单位时间
+								</div>
+								<div class="mt-1 h-1 bg-amber-200 rounded-full overflow-hidden">
+									<div
+										class="h-full bg-amber-500 transition-all duration-200"
+										style="width: {Math.max(0, Math.min(100, (1 - cartState.waitRemaining / Math.max(cartState.waitRemaining + 0.1, 1)) * 100))}%"
+									></div>
+								</div>
+							{:else if cartState.nextNodeId}
+								<div class="text-xs text-tertiary-600">
+									下一站: <span class="font-medium">{cartState.nextNodeId.slice(0, 8)}</span>
+								</div>
+								<div class="mt-1 h-1 bg-surface-200 rounded-full overflow-hidden">
+									<div
+										class="h-full bg-primary-500 transition-all duration-200"
+										style="width: {cartState.progress * 100}%"
+									></div>
+								</div>
+								<div class="text-xs text-tertiary-400 mt-0.5 text-right">
+									{(cartState.progress * 100).toFixed(0)}%
+								</div>
+							{:else}
+								<div class="text-xs text-green-600">已抵达终点</div>
+							{/if}
 						</div>
 					{/each}
 				{/if}
@@ -274,10 +317,12 @@
 						<div
 							class="p-1.5 rounded text-xs"
 							class:bg-error-50={event.type === 'conflict'}
+							class:bg-amber-50={event.type === 'wait'}
 							class:bg-warning-50={event.type === 'switch'}
 							class:bg-info-50={event.type === 'depart' || event.type === 'arrive'}
 							class:border-l-2={true}
 							class:border-l-error-500={event.type === 'conflict'}
+							class:border-l-amber-500={event.type === 'wait'}
 							class:border-l-warning-500={event.type === 'switch'}
 							class:border-l-info-500={event.type === 'depart' || event.type === 'arrive'}
 						>

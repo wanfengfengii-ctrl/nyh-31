@@ -104,6 +104,8 @@ export interface PlaybackFrame {
 		nextNodeId: string | null;
 		progress: number;
 		isWaiting: boolean;
+		waitRemaining: number;
+		waitNodeLabel: string;
 		color: string;
 	}[];
 	congestedEdges: { edgeId: string; level: number }[];
@@ -122,6 +124,8 @@ export interface DispatchScheme {
 	id: string;
 	name: string;
 	carts: Cart[];
+	nodes: MineNode[];
+	edges: MineEdge[];
 	createdAt: number;
 	updatedAt: number;
 }
