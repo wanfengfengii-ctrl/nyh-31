@@ -9,8 +9,11 @@
 		selectedNodeId,
 		selectedEdgeId,
 		pathResult,
-		faults as faultsStore
+		faults as faultsStore,
+		playbackActive,
+		playbackTime
 	} from '$lib/stores';
+	import { getActiveFaultsAtTime } from '$lib/faultManagement';
 	import type {
 		MineNode,
 		MineEdge,
@@ -433,8 +436,21 @@
 	let unsubscribeSelectedNode: (() => void) | null = null;
 	let unsubscribeSelectedEdge: (() => void) | null = null;
 	let unsubscribeFaults: (() => void) | null = null;
+	let unsubscribePlaybackActive: (() => void) | null = null;
+	let unsubscribePlaybackTime: (() => void) | null = null;
 	let faultAnimationTimer: number | null = null;
 	let faultBlinkState = false;
+
+	function getEffectiveFaults(): Fault[] {
+		const $playbackActive = get(playbackActive);
+		const $playbackTime = get(playbackTime);
+		const $allFaults = get(faultsStore);
+
+		if ($playbackActive) {
+			return getActiveFaultsAtTime($allFaults, $playbackTime);
+		}
+		return $allFaults;
+	}
 
 	function startFaultAnimation() {
 		if (faultAnimationTimer) return;
@@ -528,7 +544,7 @@
 			if (!cy) return;
 			const $nodes = get(nodesStore);
 			const $edges = get(edgesStore);
-			const $faults = get(faultsStore);
+			const $faults = getEffectiveFaults();
 			cy.elements().remove();
 			cy.add(nodesToElements($nodes, $edges, $faults));
 
@@ -548,7 +564,19 @@
 		});
 
 		unsubscribeFaults = faultsStore.subscribe(($faults: Fault[]) => {
+			if (!get(playbackActive)) {
+				refreshElements();
+			}
+		});
+
+		unsubscribePlaybackActive = playbackActive.subscribe(() => {
 			refreshElements();
+		});
+
+		unsubscribePlaybackTime = playbackTime.subscribe(() => {
+			if (get(playbackActive)) {
+				refreshElements();
+			}
 		});
 
 		unsubscribePath = pathResult.subscribe(($pathResult: PathResultType) => {
@@ -583,6 +611,8 @@
 		if (unsubscribeSelectedNode) unsubscribeSelectedNode();
 		if (unsubscribeSelectedEdge) unsubscribeSelectedEdge();
 		if (unsubscribeFaults) unsubscribeFaults();
+		if (unsubscribePlaybackActive) unsubscribePlaybackActive();
+		if (unsubscribePlaybackTime) unsubscribePlaybackTime();
 		stopFaultAnimation();
 		if (waitingAnimationTimer) clearInterval(waitingAnimationTimer);
 		if (cy) cy.destroy();

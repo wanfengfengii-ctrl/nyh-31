@@ -410,7 +410,14 @@ export function compareFaultScenarios(
 	);
 	const afterFault = calculateDispatch(faultNodes, faultEdges, carts);
 
-	const afterRepair = beforeFault;
+	const repairedFaults = faults.map((f) => ({ ...f, status: 'resolved' as const }));
+	const { nodes: repairedNodes, edges: repairedEdges } = applyFaultsToNetwork(
+		nodes,
+		edges,
+		repairedFaults,
+		Infinity
+	);
+	const afterRepair = calculateDispatch(repairedNodes, repairedEdges, carts);
 
 	const deltaTotalTime = afterFault.totalTime - beforeFault.totalTime;
 	const deltaTotalDistance = afterFault.totalDistance - beforeFault.totalDistance;
@@ -433,6 +440,171 @@ export function compareFaultScenarios(
 		deltaCongestionRisk,
 		affectedCartCount
 	};
+}
+
+export function generateFaultPlaybackFrames(
+	nodes: MineNode[],
+	edges: MineEdge[],
+	carts: Cart[],
+	faults: Fault[],
+	frameInterval: number = 0.5
+): {
+	time: number;
+	phase: 'normal' | 'fault-occurring' | 'fault-active' | 'repairing' | 'recovered';
+	activeFaultIds: string[];
+	repairingFaultIds: string[];
+	resolvedFaultIds: string[];
+	nodes: MineNode[];
+	edges: MineEdge[];
+	events: { type: string; faultId: string; faultName: string; targetLabel: string }[];
+}[] {
+	const frames: {
+		time: number;
+		phase: 'normal' | 'fault-occurring' | 'fault-active' | 'repairing' | 'recovered';
+		activeFaultIds: string[];
+		repairingFaultIds: string[];
+		resolvedFaultIds: string[];
+		nodes: MineNode[];
+		edges: MineEdge[];
+		events: { type: string; faultId: string; faultName: string; targetLabel: string }[];
+	}[] = [];
+
+	if (faults.length === 0) return frames;
+
+	const timeline: {
+		time: number;
+		events: { type: string; faultId: string }[];
+	}[] = [];
+
+	const timeEvents = new Map<number, { type: string; faultId: string }[]>();
+
+	faults.forEach((fault) => {
+		if (!timeEvents.has(fault.occurrenceTime)) {
+			timeEvents.set(fault.occurrenceTime, []);
+		}
+		timeEvents.get(fault.occurrenceTime)!.push({
+			type: 'fault-occur',
+			faultId: fault.id
+		});
+
+		const repairStartTime = fault.repairStartTime ?? fault.occurrenceTime + 5;
+		if (!timeEvents.has(repairStartTime)) {
+			timeEvents.set(repairStartTime, []);
+		}
+		timeEvents.get(repairStartTime)!.push({
+			type: 'repair-start',
+			faultId: fault.id
+		});
+
+		const repairEndTime = repairStartTime + fault.repairDuration;
+		if (!timeEvents.has(repairEndTime)) {
+			timeEvents.set(repairEndTime, []);
+		}
+		timeEvents.get(repairEndTime)!.push({
+			type: 'repair-complete',
+			faultId: fault.id
+		});
+	});
+
+	const sortedTimes = Array.from(timeEvents.keys()).sort((a, b) => a - b);
+	const firstEventTime = sortedTimes.length > 0 ? sortedTimes[0] : 0;
+	const lastEventTime =
+		sortedTimes.length > 0 ? sortedTimes[sortedTimes.length - 1] : 100;
+
+	const startTime = Math.max(0, firstEventTime - 10);
+	const endTime = lastEventTime + 10;
+
+	const occurredFaults = new Set<string>();
+	const repairingFaults = new Set<string>();
+	const resolvedFaults = new Set<string>();
+
+	let eventIndex = 0;
+
+	for (let time = startTime; time <= endTime; time += frameInterval) {
+		const frameEvents: {
+			type: string;
+			faultId: string;
+			faultName: string;
+			targetLabel: string;
+		}[] = [];
+
+		while (eventIndex < sortedTimes.length && sortedTimes[eventIndex] <= time) {
+			const eventTime = sortedTimes[eventIndex];
+			const events = timeEvents.get(eventTime) || [];
+
+			events.forEach((event) => {
+				const fault = faults.find((f) => f.id === event.faultId);
+				if (!fault) return;
+
+				if (event.type === 'fault-occur') {
+					occurredFaults.add(fault.id);
+					frameEvents.push({
+						type: 'fault-occur',
+						faultId: fault.id,
+						faultName: fault.faultTypeName,
+						targetLabel: fault.targetLabel
+					});
+				} else if (event.type === 'repair-start') {
+					repairingFaults.add(fault.id);
+					frameEvents.push({
+						type: 'repair-start',
+						faultId: fault.id,
+						faultName: fault.faultTypeName,
+						targetLabel: fault.targetLabel
+					});
+				} else if (event.type === 'repair-complete') {
+					resolvedFaults.add(fault.id);
+					repairingFaults.delete(fault.id);
+					frameEvents.push({
+						type: 'repair-complete',
+						faultId: fault.id,
+						faultName: fault.faultTypeName,
+						targetLabel: fault.targetLabel
+					});
+				}
+			});
+
+			eventIndex++;
+		}
+
+		let phase: 'normal' | 'fault-occurring' | 'fault-active' | 'repairing' | 'recovered';
+
+		if (occurredFaults.size === 0) {
+			phase = 'normal';
+		} else if (resolvedFaults.size === faults.length) {
+			phase = 'recovered';
+		} else if (repairingFaults.size > 0) {
+			phase = 'repairing';
+		} else if (frameEvents.some((e) => e.type === 'fault-occur')) {
+			phase = 'fault-occurring';
+		} else {
+			phase = 'fault-active';
+		}
+
+		const activeFaultsForFrame = faults.filter(
+			(f) => occurredFaults.has(f.id) && !resolvedFaults.has(f.id)
+		);
+
+		const { nodes: frameNodes, edges: frameEdges } = applyFaultsToNetwork(
+			nodes,
+			edges,
+			activeFaultsForFrame,
+			time
+		);
+
+		frames.push({
+			time,
+			phase,
+			activeFaultIds: Array.from(occurredFaults).filter((id) => !resolvedFaults.has(id)),
+			repairingFaultIds: Array.from(repairingFaults),
+			resolvedFaultIds: Array.from(resolvedFaults),
+			nodes: frameNodes,
+			edges: frameEdges,
+			events: frameEvents
+		});
+	}
+
+	return frames;
 }
 
 export function generateFaultTimeline(
@@ -507,8 +679,13 @@ export function getFaultStatusAtTime(fault: Fault, time: number): FaultStatus {
 }
 
 export function getActiveFaultsAtTime(faults: Fault[], time: number): Fault[] {
-	return faults.filter((f) => {
-		const status = getFaultStatusAtTime(f, time);
-		return status === 'pending' || status === 'repairing';
-	});
+	return faults
+		.filter((f) => {
+			const status = getFaultStatusAtTime(f, time);
+			return status === 'pending' || status === 'repairing';
+		})
+		.map((f) => ({
+			...f,
+			status: getFaultStatusAtTime(f, time)
+		}));
 }

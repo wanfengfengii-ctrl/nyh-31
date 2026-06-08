@@ -16,8 +16,11 @@
 		resolveFault,
 		getAvailableFaultTypes,
 		getFaultTypeById,
-		clearAllFaults
+		clearAllFaults,
+		setPlaybackActive,
+		setPlaybackTime
 	} from '$lib/stores';
+	import { generateFaultPlaybackFrames } from '$lib/faultManagement';
 	import type {
 		Fault,
 		FaultType,
@@ -27,7 +30,23 @@
 		AffectedCart
 	} from '$lib/types';
 
-	let activeTab: 'config' | 'impact' | 'priority' | 'compare' = 'config';
+	let activeTab: 'config' | 'impact' | 'priority' | 'compare' | 'playback' = 'config';
+	let isPlaying = false;
+	let playbackIndex = 0;
+	let playbackSpeed = 1;
+	let playbackInterval: ReturnType<typeof setInterval> | null = null;
+	let expandedCartId: string | null = null;
+	let expandedFaultId: string | null = null;
+
+	$: playbackFrames = faultsArray.length > 0
+		? generateFaultPlaybackFrames(nodesArray, edgesArray, cartsArray, faultsArray)
+		: [];
+
+	$: currentFrame = playbackFrames[playbackIndex] || null;
+
+	$: if (currentFrame && activeTab === 'playback') {
+		setPlaybackTime(currentFrame.time);
+	}
 	let showAddFault = false;
 	let addFaultTargetType: FaultTargetType = 'node';
 	let selectedTargetId = '';
@@ -199,6 +218,101 @@
 	function formatTime(time: number): string {
 		return time.toFixed(1);
 	}
+
+	function getPhaseLabel(
+		phase: 'normal' | 'fault-occurring' | 'fault-active' | 'repairing' | 'recovered'
+	): string {
+		switch (phase) {
+			case 'normal':
+				return '正常运行';
+			case 'fault-occurring':
+				return '故障发生';
+			case 'fault-active':
+				return '故障影响';
+			case 'repairing':
+				return '抢修中';
+			case 'recovered':
+				return '修复完成';
+			default:
+				return '未知';
+		}
+	}
+
+	function getPhaseColor(
+		phase: 'normal' | 'fault-occurring' | 'fault-active' | 'repairing' | 'recovered'
+	): string {
+		switch (phase) {
+			case 'normal':
+				return 'text-success-600 bg-success-100';
+			case 'fault-occurring':
+				return 'text-error-600 bg-error-100';
+			case 'fault-active':
+				return 'text-error-700 bg-error-50';
+			case 'repairing':
+				return 'text-warning-600 bg-warning-100';
+			case 'recovered':
+				return 'text-success-600 bg-success-100';
+			default:
+				return 'text-tertiary-600 bg-surface-100';
+		}
+	}
+
+	function togglePlayback() {
+		if (isPlaying) {
+			stopPlayback();
+		} else {
+			startPlayback();
+		}
+	}
+
+	function startPlayback() {
+		if (playbackFrames.length === 0) return;
+		if (playbackIndex >= playbackFrames.length - 1) {
+			playbackIndex = 0;
+		}
+		isPlaying = true;
+		setPlaybackActive(true);
+		playbackInterval = setInterval(() => {
+			playbackIndex++;
+			if (playbackIndex >= playbackFrames.length - 1) {
+				stopPlayback();
+				playbackIndex = playbackFrames.length - 1;
+			}
+		}, 100 / playbackSpeed);
+	}
+
+	function stopPlayback() {
+		isPlaying = false;
+		if (playbackInterval) {
+			clearInterval(playbackInterval);
+			playbackInterval = null;
+		}
+	}
+
+	function resetPlayback() {
+		stopPlayback();
+		playbackIndex = 0;
+		setPlaybackActive(false);
+	}
+
+	function handleTabChange(tab: typeof activeTab) {
+		if (activeTab === 'playback' && tab !== 'playback') {
+			stopPlayback();
+			setPlaybackActive(false);
+		}
+		if (tab === 'playback') {
+			playbackIndex = 0;
+		}
+		activeTab = tab;
+	}
+
+	function toggleCartExpand(cartId: string) {
+		expandedCartId = expandedCartId === cartId ? null : cartId;
+	}
+
+	function toggleFaultExpand(faultId: string) {
+		expandedFaultId = expandedFaultId === faultId ? null : faultId;
+	}
 </script>
 
 <div class="card p-4 space-y-3">
@@ -206,12 +320,12 @@
 		<h3 class="text-lg font-bold text-primary-900">🔧 设备故障与应急抢修指挥</h3>
 	</div>
 
-	<div class="flex gap-1 text-xs">
+	<div class="flex gap-1 text-xs flex-wrap">
 		<button
 			class="btn btn-xs flex-1"
 			class:variant-filled-primary={activeTab === 'config'}
 			class:variant-soft={activeTab !== 'config'}
-			on:click={() => (activeTab = 'config')}
+			on:click={() => handleTabChange('config')}
 		>
 			故障配置
 		</button>
@@ -219,7 +333,7 @@
 			class="btn btn-xs flex-1"
 			class:variant-filled-primary={activeTab === 'impact'}
 			class:variant-soft={activeTab !== 'impact'}
-			on:click={() => (activeTab = 'impact')}
+			on:click={() => handleTabChange('impact')}
 		>
 			影响评估
 		</button>
@@ -227,7 +341,7 @@
 			class="btn btn-xs flex-1"
 			class:variant-filled-primary={activeTab === 'priority'}
 			class:variant-soft={activeTab !== 'priority'}
-			on:click={() => (activeTab = 'priority')}
+			on:click={() => handleTabChange('priority')}
 		>
 			抢修排序
 		</button>
@@ -235,9 +349,17 @@
 			class="btn btn-xs flex-1"
 			class:variant-filled-primary={activeTab === 'compare'}
 			class:variant-soft={activeTab !== 'compare'}
-			on:click={() => (activeTab = 'compare')}
+			on:click={() => handleTabChange('compare')}
 		>
 			方案对比
+		</button>
+		<button
+			class="btn btn-xs flex-1"
+			class:variant-filled-primary={activeTab === 'playback'}
+			class:variant-soft={activeTab !== 'playback'}
+			on:click={() => handleTabChange('playback')}
+		>
+			🎬 故障回放
 		</button>
 	</div>
 
@@ -513,29 +635,91 @@
 
 							{#if impact.affectedCarts.length > 0}
 								<div>
-									<p class="text-xs font-medium text-primary-700 mb-1">受影响车辆</p>
-									<div class="space-y-1 max-h-32 overflow-y-auto">
+									<p class="text-xs font-medium text-primary-700 mb-1">
+										受影响车辆（点击查看路线详情）
+									</p>
+									<div class="space-y-1 max-h-64 overflow-y-auto">
 										{#each impact.affectedCarts as cart (cart.cartId)}
-											<div
-												class="flex items-center justify-between p-1.5 bg-white rounded text-xs"
-											>
-												<div class="flex items-center gap-1.5">
-													<div
-														class="w-3 h-3 rounded-full border border-gray-600"
-														style="background-color: {cart.cartColor}"
-													></div>
-													<span>{cart.cartName}</span>
+											<div class="bg-white rounded text-xs overflow-hidden">
+												<div
+													class="flex items-center justify-between p-1.5 cursor-pointer hover:bg-primary-50"
+													on:click={() => toggleCartExpand(cart.cartId)}
+												>
+													<div class="flex items-center gap-1.5">
+														<span class="text-tertiary-400 text-xs">
+															{expandedCartId === cart.cartId ? '▼' : '▶'}
+														</span>
+														<div
+															class="w-3 h-3 rounded-full border border-gray-600"
+															style="background-color: {cart.cartColor}"
+														></div>
+														<span>{cart.cartName}</span>
+													</div>
+													<div class="flex items-center gap-2">
+														<span class={getImpactLevelColor(cart.impactLevel)}>
+															{getImpactLevelLabel(cart.impactLevel)}
+														</span>
+														<span class="text-tertiary-500">
+															{cart.delayTime > 0
+																? `+${cart.delayTime.toFixed(1)}`
+																: '不可达'}
+														</span>
+													</div>
 												</div>
-												<div class="flex items-center gap-2">
-													<span class={getImpactLevelColor(cart.impactLevel)}>
-														{getImpactLevelLabel(cart.impactLevel)}
-													</span>
-													<span class="text-tertiary-500">
-														{cart.delayTime > 0
-															? `+${cart.delayTime.toFixed(1)}`
-															: '不可达'}
-													</span>
-												</div>
+
+												{#if expandedCartId === cart.cartId}
+													<div class="p-2 bg-surface-50 border-t border-surface-200 space-y-2">
+														<div>
+															<p class="text-xs text-tertiary-500 mb-1">
+																原始路线
+															</p>
+															<div class="flex flex-wrap gap-1">
+																{#each cart.originalRoute as nodeId, idx (nodeId)}
+																	<span
+																		class="px-1.5 py-0.5 bg-primary-100 text-primary-700 rounded text-xs"
+																	>
+																		{nodeId}
+																	</span>
+																	{#if idx < cart.originalRoute.length - 1}
+																		<span class="text-tertiary-300">→</span>
+																	{/if}
+																{/each}
+															</div>
+															<p class="text-xs text-tertiary-500 mt-1">
+																耗时: {cart.originalTotalTime.toFixed(1)}
+															</p>
+														</div>
+
+														<div>
+															<p class="text-xs text-tertiary-500 mb-1">
+																替代路线
+															</p>
+															{#if cart.hasAlternative && cart.alternativeRoute}
+																<div class="flex flex-wrap gap-1">
+																	{#each cart.alternativeRoute as nodeId, idx (nodeId)}
+																		<span
+																			class="px-1.5 py-0.5 bg-success-100 text-success-700 rounded text-xs"
+																		>
+																			{nodeId}
+																		</span>
+																		{#if idx < cart.alternativeRoute.length - 1}
+																			<span class="text-tertiary-300">→</span>
+																		{/if}
+																	{/each}
+																</div>
+																<p class="text-xs text-tertiary-500 mt-1">
+																	耗时: {cart.newTotalTime > 0
+																		? cart.newTotalTime.toFixed(1)
+																		: '-'}
+																</p>
+															{:else}
+																<p class="text-xs text-error-600">
+																	无替代路线，车辆不可达
+																</p>
+															{/if}
+														</div>
+													</div>
+												{/if}
 											</div>
 										{/each}
 									</div>
@@ -644,7 +828,7 @@
 				</p>
 			{:else}
 				<p class="text-xs text-tertiary-500">
-					故障发生前后运输方案对比分析
+					故障前 · 故障后 · 修复后 三阶段对比分析
 				</p>
 
 				<div class="overflow-x-auto">
@@ -654,7 +838,7 @@
 								<th>指标</th>
 								<th class="text-right">故障前</th>
 								<th class="text-right">故障后</th>
-								<th class="text-right">变化</th>
+								<th class="text-right">修复后</th>
 							</tr>
 						</thead>
 						<tbody>
@@ -663,16 +847,18 @@
 								<td class="text-right">
 									{comparison.beforeFault?.totalTime.toFixed(1) || '-'}
 								</td>
-								<td class="text-right">
+								<td
+									class="text-right font-medium"
+									class:text-error-600={comparison.deltaTotalTime > 0}
+								>
 									{comparison.afterFault?.totalTime.toFixed(1) || '-'}
 								</td>
 								<td
 									class="text-right font-medium"
-									class:text-error-600={comparison.deltaTotalTime > 0}
-									class:text-success-600={comparison.deltaTotalTime <= 0}
+									class:text-success-600={comparison.afterRepair?.totalTime ===
+										comparison.beforeFault?.totalTime}
 								>
-									{comparison.deltaTotalTime > 0 ? '+' : ''}
-									{comparison.deltaTotalTime.toFixed(1)}
+									{comparison.afterRepair?.totalTime.toFixed(1) || '-'}
 								</td>
 							</tr>
 							<tr>
@@ -680,16 +866,18 @@
 								<td class="text-right">
 									{comparison.beforeFault?.totalDistance.toFixed(0) || '-'}
 								</td>
-								<td class="text-right">
+								<td
+									class="text-right font-medium"
+									class:text-error-600={comparison.deltaTotalDistance > 0}
+								>
 									{comparison.afterFault?.totalDistance.toFixed(0) || '-'}
 								</td>
 								<td
 									class="text-right font-medium"
-									class:text-error-600={comparison.deltaTotalDistance > 0}
-									class:text-success-600={comparison.deltaTotalDistance <= 0}
+									class:text-success-600={comparison.afterRepair?.totalDistance ===
+										comparison.beforeFault?.totalDistance}
 								>
-									{comparison.deltaTotalDistance > 0 ? '+' : ''}
-									{comparison.deltaTotalDistance.toFixed(0)}
+									{comparison.afterRepair?.totalDistance.toFixed(0) || '-'}
 								</td>
 							</tr>
 							<tr>
@@ -697,68 +885,97 @@
 								<td class="text-right">
 									{comparison.beforeFault?.congestionRisk || 0}%
 								</td>
-								<td class="text-right">
-									{comparison.afterFault?.congestionRisk || 0}%
-								</td>
 								<td
 									class="text-right font-medium"
 									class:text-error-600={comparison.deltaCongestionRisk > 0}
-									class:text-success-600={comparison.deltaCongestionRisk <= 0}
 								>
-									{comparison.deltaCongestionRisk > 0 ? '+' : ''}
-									{comparison.deltaCongestionRisk}%
+									{comparison.afterFault?.congestionRisk || 0}%
+								</td>
+								<td class="text-right">
+									{comparison.afterRepair?.congestionRisk || 0}%
 								</td>
 							</tr>
 							<tr>
-								<td>受影响车辆</td>
-								<td class="text-right">-</td>
-								<td class="text-right text-error-600 font-medium">
-									{comparison.affectedCartCount} 辆
+								<td>不可达车辆</td>
+								<td class="text-right text-success-600">
+									0 辆
 								</td>
-								<td class="text-right">-</td>
+								<td class="text-right text-error-600 font-medium">
+									{comparison.afterFault?.routes.filter((r) => !r.hasPath).length || 0} 辆
+								</td>
+								<td class="text-right text-success-600">
+									{comparison.afterRepair?.routes.filter((r) => !r.hasPath).length || 0} 辆
+								</td>
 							</tr>
 						</tbody>
 					</table>
 				</div>
 
-				{#if comparison.afterFault && comparison.beforeFault}
+				{#if comparison.afterFault && comparison.beforeFault && comparison.afterRepair}
 					<div class="space-y-1">
-						<p class="text-xs font-medium text-primary-700">各车详细对比</p>
-						<div class="max-h-40 overflow-y-auto space-y-1">
+						<p class="text-xs font-medium text-primary-700">各车三阶段对比</p>
+						<div class="max-h-48 overflow-y-auto space-y-1">
 							{#each comparison.beforeFault.routes as route (route.cartId)}
 								{@const afterRoute = comparison.afterFault?.routes.find(
 									(r) => r.cartId === route.cartId
 								)}
+								{@const repairedRoute = comparison.afterRepair?.routes.find(
+									(r) => r.cartId === route.cartId
+								)}
 								{@const cart = cartsArray.find((c) => c.id === route.cartId)}
-								{#if afterRoute && cart}
+								{#if afterRoute && cart && repairedRoute}
 									<div
-										class="flex items-center justify-between p-2 bg-surface-50 rounded text-xs"
+										class="p-2 bg-surface-50 rounded text-xs space-y-1"
 									>
-										<div class="flex items-center gap-2">
-											<div
-												class="w-3 h-3 rounded-full border border-gray-600"
-												style="background-color: {cart.color}"
-											></div>
-											<span>{route.cartName}</span>
-										</div>
-										<div class="flex gap-3">
-											<span class="text-tertiary-500">
-												{route.totalTime.toFixed(1)} →
-											</span>
+										<div class="flex items-center justify-between">
+											<div class="flex items-center gap-2">
+												<div
+													class="w-3 h-3 rounded-full border border-gray-600"
+													style="background-color: {cart.color}"
+												></div>
+												<span class="font-medium">{route.cartName}</span>
+											</div>
 											<span
-												class="font-medium"
-												class:text-error-600={afterRoute.totalTime >
-													route.totalTime * 1.1}
-												class:text-warning-600={afterRoute.totalTime >
-													route.totalTime &&
-													afterRoute.totalTime <= route.totalTime * 1.1}
-												class:text-success-600={afterRoute.totalTime <=
-													route.totalTime}
+												class="text-xs"
+												class:text-success-600={repairedRoute.hasPath &&
+													repairedRoute.totalTime <= route.totalTime * 1.05}
+												class:text-warning-600={repairedRoute.hasPath &&
+													repairedRoute.totalTime > route.totalTime * 1.05}
+												class:text-error-600={!repairedRoute.hasPath}
 											>
-												{afterRoute.hasPath
-													? afterRoute.totalTime.toFixed(1)
-													: '不可达'}
+												{repairedRoute.hasPath
+													? repairedRoute.totalTime <= route.totalTime * 1.05
+														? '✓ 已恢复'
+														: '△ 部分恢复'
+													: '✗ 仍不可达'}
 											</span>
+										</div>
+										<div class="grid grid-cols-3 gap-2 text-center">
+											<div>
+												<p class="text-tertiary-400 text-xs">故障前</p>
+												<p class="text-primary-700 font-medium">
+													{route.totalTime.toFixed(1)}
+												</p>
+											</div>
+											<div>
+												<p class="text-tertiary-400 text-xs">故障后</p>
+												<p
+													class="font-medium"
+													class:text-error-600={!afterRoute.hasPath}
+												>
+													{afterRoute.hasPath
+														? afterRoute.totalTime.toFixed(1)
+														: '不可达'}
+												</p>
+											</div>
+											<div>
+												<p class="text-tertiary-400 text-xs">修复后</p>
+												<p class="text-success-600 font-medium">
+													{repairedRoute.hasPath
+														? repairedRoute.totalTime.toFixed(1)
+														: '不可达'}
+												</p>
+											</div>
 										</div>
 									</div>
 								{/if}
@@ -768,8 +985,187 @@
 				{/if}
 
 				<div class="bg-warning-50 p-2 rounded text-xs text-warning-700">
-					💡 <strong>建议:</strong> 优先处理高优先级故障，恢复关键线路运输能力。
-					所有故障修复后运输能力可恢复至故障前水平。
+					💡 <strong>说明:</strong> 修复后数据基于所有故障均已排除的情况重新计算，
+					反映系统完全恢复后的真实运输状态。
+				</div>
+			{/if}
+		</div>
+	{/if}
+
+	{#if activeTab === 'playback'}
+		<div class="space-y-3">
+			{#if faultsArray.length === 0}
+				<p class="text-xs text-tertiary-500 text-center py-8">
+					请先添加故障以使用回放功能
+				</p>
+			{:else if playbackFrames.length === 0}
+				<p class="text-xs text-tertiary-500 text-center py-8">
+					无法生成回放心帧
+				</p>
+			{:else}
+				<div class="space-y-2">
+					<div class="flex items-center justify-between">
+						<div class="flex items-center gap-2">
+							<span class="text-sm font-medium text-primary-700">🎬 故障回放</span>
+							<span
+								class={`text-xs px-2 py-0.5 rounded-full font-medium ${getPhaseColor(
+									currentFrame?.phase || 'normal'
+								)}`}
+							>
+								{getPhaseLabel(currentFrame?.phase || 'normal')}
+							</span>
+						</div>
+						<span class="text-xs text-tertiary-500">
+							T = {currentFrame?.time.toFixed(1) || '0.0'}
+						</span>
+					</div>
+
+					<div class="flex items-center gap-2">
+						<button
+							class="btn btn-xs variant-soft-primary flex-1"
+							on:click={togglePlayback}
+						>
+							{isPlaying ? '⏸ 暂停' : '▶ 播放'}
+						</button>
+						<button
+							class="btn btn-xs variant-ghost"
+							on:click={resetPlayback}
+						>
+							⟲ 重置
+						</button>
+					</div>
+
+					<div class="flex items-center gap-2">
+						<span class="text-xs text-tertiary-500">速度:</span>
+						<div class="flex gap-1">
+							{#each [0.5, 1, 2, 4] as speed}
+								<button
+									class="btn btn-xs"
+									class:variant-filled-primary={playbackSpeed === speed}
+									class:variant-soft={playbackSpeed !== speed}
+									on:click={() => {
+										playbackSpeed = speed;
+										if (isPlaying) {
+											stopPlayback();
+											startPlayback();
+										}
+									}}
+								>
+									{speed}x
+								</button>
+							{/each}
+						</div>
+					</div>
+
+					<div>
+						<input
+							type="range"
+							min="0"
+							max={playbackFrames.length - 1}
+							bind:value={playbackIndex}
+							class="w-full h-2 bg-surface-200 rounded-lg appearance-none cursor-pointer"
+						/>
+						<div class="flex justify-between text-xs text-tertiary-400">
+							<span>开始</span>
+							<span>结束</span>
+						</div>
+					</div>
+
+					<div class="space-y-1">
+						<p class="text-xs font-medium text-primary-700">当前状态</p>
+						<div class="grid grid-cols-3 gap-1 text-xs">
+							<div class="text-center p-2 bg-surface-50 rounded">
+								<p class="text-tertiary-500">活跃故障</p>
+								<p class="font-bold text-error-600">
+									{currentFrame?.activeFaultIds.length || 0}
+								</p>
+							</div>
+							<div class="text-center p-2 bg-surface-50 rounded">
+								<p class="text-tertiary-500">抢修中</p>
+								<p class="font-bold text-warning-600">
+									{currentFrame?.repairingFaultIds.length || 0}
+								</p>
+							</div>
+							<div class="text-center p-2 bg-surface-50 rounded">
+								<p class="text-tertiary-500">已修复</p>
+								<p class="font-bold text-success-600">
+									{currentFrame?.resolvedFaultIds.length || 0}
+								</p>
+							</div>
+						</div>
+					</div>
+
+					{#if currentFrame && currentFrame.events.length > 0}
+						<div class="space-y-1">
+							<p class="text-xs font-medium text-primary-700">
+								📌 实时事件
+							</p>
+							<div class="space-y-1 max-h-32 overflow-y-auto">
+								{#each currentFrame.events as event}
+									<div
+										class={`p-2 rounded text-xs ${
+											event.type === 'fault-occur'
+												? 'bg-error-50 text-error-700'
+												: event.type === 'repair-start'
+													? 'bg-warning-50 text-warning-700'
+													: 'bg-success-50 text-success-700'
+										}`}
+									>
+										<span class="font-medium">
+											{event.type === 'fault-occur'
+												? '⚠ 故障发生: '
+												: event.type === 'repair-start'
+													? '🔧 开始抢修: '
+													: '✓ 修复完成: '}
+										</span>
+										{event.faultName} - {event.targetLabel}
+									</div>
+								{/each}
+							</div>
+						</div>
+					{/if}
+
+					<div class="space-y-1">
+						<p class="text-xs font-medium text-primary-700">故障时间线</p>
+						<div class="space-y-1 max-h-40 overflow-y-auto">
+							{#each faultsArray as fault}
+								<div
+									class={`p-2 rounded text-xs border-l-4 ${
+										currentFrame?.resolvedFaultIds.includes(fault.id)
+											? 'bg-success-50 border-success-400'
+											: currentFrame?.repairingFaultIds.includes(fault.id)
+												? 'bg-warning-50 border-warning-400'
+												: currentFrame?.activeFaultIds.includes(fault.id)
+													? 'bg-error-50 border-error-400'
+													: 'bg-surface-50 border-surface-300'
+									}`}
+								>
+									<div class="flex items-center justify-between">
+										<span class="font-medium">{fault.faultTypeName}</span>
+										<span class="text-tertiary-500 text-xs">
+											{currentFrame?.resolvedFaultIds.includes(fault.id)
+												? '已修复'
+												: currentFrame?.repairingFaultIds.includes(fault.id)
+													? '抢修中'
+													: currentFrame?.activeFaultIds.includes(fault.id)
+														? '待处理'
+														: '未发生'}
+										</span>
+									</div>
+									<div class="text-tertiary-500 text-xs mt-0.5">
+										位置: {fault.targetLabel}
+									</div>
+									<div class="text-tertiary-400 text-xs mt-0.5">
+										发生 T={fault.occurrenceTime} · 修复需时 {fault.repairDuration}
+									</div>
+								</div>
+							{/each}
+						</div>
+					</div>
+
+					<div class="text-xs text-tertiary-400 text-center pt-1">
+						提示: 播放时左侧地图会同步显示故障状态变化
+					</div>
 				</div>
 			{/if}
 		</div>

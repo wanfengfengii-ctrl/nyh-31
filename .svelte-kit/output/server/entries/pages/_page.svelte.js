@@ -786,7 +786,14 @@ function compareFaultScenarios(nodes2, edges2, carts2, faults2) {
     Math.max(...faults2.map((f) => f.occurrenceTime)) + 1
   );
   const afterFault = calculateDispatch(faultNodes, faultEdges, carts2);
-  const afterRepair = beforeFault;
+  const repairedFaults = faults2.map((f) => ({ ...f, status: "resolved" }));
+  const { nodes: repairedNodes, edges: repairedEdges } = applyFaultsToNetwork(
+    nodes2,
+    edges2,
+    repairedFaults,
+    Infinity
+  );
+  const afterRepair = calculateDispatch(repairedNodes, repairedEdges, carts2);
   const deltaTotalTime = afterFault.totalTime - beforeFault.totalTime;
   const deltaTotalDistance = afterFault.totalDistance - beforeFault.totalDistance;
   const deltaCongestionRisk = afterFault.congestionRisk - beforeFault.congestionRisk;
@@ -806,6 +813,23 @@ function compareFaultScenarios(nodes2, edges2, carts2, faults2) {
     deltaCongestionRisk,
     affectedCartCount
   };
+}
+function getFaultStatusAtTime(fault, time) {
+  if (time < fault.occurrenceTime) return "pending";
+  const repairStartTime = fault.repairStartTime ?? fault.occurrenceTime + 5;
+  const repairEndTime = repairStartTime + fault.repairDuration;
+  if (time >= repairEndTime) return "resolved";
+  if (time >= repairStartTime) return "repairing";
+  return "pending";
+}
+function getActiveFaultsAtTime(faults2, time) {
+  return faults2.filter((f) => {
+    const status = getFaultStatusAtTime(f, time);
+    return status === "pending" || status === "repairing";
+  }).map((f) => ({
+    ...f,
+    status: getFaultStatusAtTime(f, time)
+  }));
 }
 const initialNodes = [
   { id: "n1", label: "1", type: "loading", x: 100, y: 200, blocked: false },
@@ -908,6 +932,36 @@ derived([edges, faults], ([$edges, $faults]) => {
     return hasFault ? { ...edge, enabled: false } : edge;
   });
 });
+const playbackActive = writable(false);
+const playbackTime = writable(0);
+derived(
+  [nodes, faults, playbackActive, playbackTime],
+  ([$nodes, $faults, $playbackActive, $playbackTime]) => {
+    if (!$playbackActive) return $nodes;
+    const activeFaults = getActiveFaultsAtTime($faults, $playbackTime).filter(
+      (f) => f.targetType === "node" && f.severity !== "minor"
+    );
+    if (activeFaults.length === 0) return $nodes;
+    return $nodes.map((node) => {
+      const hasFault = activeFaults.some((f) => f.targetId === node.id);
+      return hasFault ? { ...node, blocked: true } : node;
+    });
+  }
+);
+derived(
+  [edges, faults, playbackActive, playbackTime],
+  ([$edges, $faults, $playbackActive, $playbackTime]) => {
+    if (!$playbackActive) return $edges;
+    const activeFaults = getActiveFaultsAtTime($faults, $playbackTime).filter(
+      (f) => f.targetType === "edge" && f.severity !== "minor"
+    );
+    if (activeFaults.length === 0) return $edges;
+    return $edges.map((edge) => {
+      const hasFault = activeFaults.some((f) => f.targetId === edge.id);
+      return hasFault ? { ...edge, enabled: false } : edge;
+    });
+  }
+);
 const CytoscapeGraph = create_ssr_component(($$result, $$props, $$bindings, slots) => {
   let { addMode = null } = $$props;
   let { playbackFrame = null } = $$props;

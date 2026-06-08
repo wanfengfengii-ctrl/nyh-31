@@ -24,7 +24,8 @@ import {
 	compareFaultScenarios,
 	defaultFaultTypes,
 	getFaultTypesByTarget,
-	applyFaultsToNetwork
+	applyFaultsToNetwork,
+	getActiveFaultsAtTime
 } from './faultManagement';
 
 function createNodeId(): string {
@@ -407,3 +408,48 @@ export function clearAllFaults() {
 	faults.set([]);
 	selectedFaultId.set(null);
 }
+
+export const playbackActive = writable<boolean>(false);
+export const playbackTime = writable<number>(0);
+
+export function setPlaybackActive(active: boolean) {
+	playbackActive.set(active);
+}
+
+export function setPlaybackTime(time: number) {
+	playbackTime.set(time);
+}
+
+export const playbackNodes = derived(
+	[nodes, faults, playbackActive, playbackTime],
+	([$nodes, $faults, $playbackActive, $playbackTime]) => {
+		if (!$playbackActive) return $nodes;
+
+		const activeFaults = getActiveFaultsAtTime($faults, $playbackTime).filter(
+			(f) => f.targetType === 'node' && f.severity !== 'minor'
+		);
+		if (activeFaults.length === 0) return $nodes;
+
+		return $nodes.map((node) => {
+			const hasFault = activeFaults.some((f) => f.targetId === node.id);
+			return hasFault ? { ...node, blocked: true } : node;
+		});
+	}
+);
+
+export const playbackEdges = derived(
+	[edges, faults, playbackActive, playbackTime],
+	([$edges, $faults, $playbackActive, $playbackTime]) => {
+		if (!$playbackActive) return $edges;
+
+		const activeFaults = getActiveFaultsAtTime($faults, $playbackTime).filter(
+			(f) => f.targetType === 'edge' && f.severity !== 'minor'
+		);
+		if (activeFaults.length === 0) return $edges;
+
+		return $edges.map((edge) => {
+			const hasFault = activeFaults.some((f) => f.targetId === edge.id);
+			return hasFault ? { ...edge, enabled: false } : edge;
+		});
+	}
+);
