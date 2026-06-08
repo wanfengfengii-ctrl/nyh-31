@@ -1,6 +1,16 @@
 import { writable, derived, get } from 'svelte/store';
-import type { MineNode, MineEdge, PathResult, MineScheme, NodeType } from './types';
+import type {
+	MineNode,
+	MineEdge,
+	PathResult,
+	MineScheme,
+	NodeType,
+	Cart,
+	DispatchResult,
+	DispatchScheme
+} from './types';
 import { calculateShortestPath } from './pathfinding';
+import { calculateDispatch, getDefaultCarts, createNewCart } from './dispatch';
 
 function createNodeId(): string {
 	return `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -176,4 +186,86 @@ export function deleteScheme(schemeId: string) {
 export function isLabelDuplicate(label: string, excludeId?: string): boolean {
 	const $nodes = get(nodes);
 	return $nodes.some((n) => n.label === label && n.id !== excludeId);
+}
+
+function createDispatchSchemeId(): string {
+	return `dispatch_scheme_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+export const carts = writable<Cart[]>([]);
+
+export const dispatchResult = derived(
+	[nodes, edges, carts],
+	([$nodes, $edges, $carts]) => {
+		if ($carts.length === 0) {
+			return {
+				routes: [],
+				conflicts: [],
+				totalTime: 0,
+				totalDistance: 0,
+				totalSwitchCount: 0,
+				congestionRisk: 0,
+				hasAllPaths: false
+			} as DispatchResult;
+		}
+		return calculateDispatch($nodes, $edges, $carts);
+	}
+);
+
+export const dispatchSchemes = writable<DispatchScheme[]>([]);
+export const currentDispatchSchemeName = writable<string>('默认调度方案');
+
+export function initDefaultCarts() {
+	const $loadingNodeId = get(loadingNodeId);
+	const $unloadingNodeId = get(unloadingNodeId);
+	if ($loadingNodeId && $unloadingNodeId) {
+		carts.set(getDefaultCarts($loadingNodeId, $unloadingNodeId));
+	}
+}
+
+export function addCart() {
+	const $carts = get(carts);
+	const $loadingNodeId = get(loadingNodeId);
+	const $unloadingNodeId = get(unloadingNodeId);
+	if ($loadingNodeId && $unloadingNodeId) {
+		const newCart = createNewCart($loadingNodeId, $unloadingNodeId, $carts.length);
+		carts.update((cs) => [...cs, newCart]);
+	}
+}
+
+export function updateCart(cartId: string, updates: Partial<Cart>) {
+	carts.update((cs) => cs.map((c) => (c.id === cartId ? { ...c, ...updates } : c)));
+}
+
+export function deleteCart(cartId: string) {
+	carts.update((cs) => cs.filter((c) => c.id !== cartId));
+}
+
+export function saveDispatchScheme(name: string) {
+	const $carts = get(carts);
+	const now = Date.now();
+
+	const newScheme: DispatchScheme = {
+		id: createDispatchSchemeId(),
+		name,
+		carts: JSON.parse(JSON.stringify($carts)),
+		createdAt: now,
+		updatedAt: now
+	};
+
+	dispatchSchemes.update((s) => [...s, newScheme]);
+	currentDispatchSchemeName.set(name);
+}
+
+export function loadDispatchScheme(schemeId: string) {
+	const $schemes = get(dispatchSchemes);
+	const scheme = $schemes.find((s) => s.id === schemeId);
+	if (!scheme) return;
+
+	carts.set(JSON.parse(JSON.stringify(scheme.carts)));
+	currentDispatchSchemeName.set(scheme.name);
+}
+
+export function deleteDispatchScheme(schemeId: string) {
+	dispatchSchemes.update((s) => s.filter((scheme) => scheme.id !== schemeId));
 }

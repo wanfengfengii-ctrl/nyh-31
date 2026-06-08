@@ -10,10 +10,17 @@
 		selectedEdgeId,
 		pathResult
 	} from '$lib/stores';
-	import type { MineNode, MineEdge, NodeType, PathResult as PathResultType } from '$lib/types';
+	import type {
+		MineNode,
+		MineEdge,
+		NodeType,
+		PathResult as PathResultType,
+		PlaybackFrame
+	} from '$lib/types';
 	import { createEventDispatcher } from 'svelte';
 
 	export let addMode: NodeType | 'edge' | null = null;
+	export let playbackFrame: PlaybackFrame | null = null;
 
 	const dispatch = createEventDispatcher<{
 		addNode: { x: number; y: number; type: NodeType };
@@ -115,6 +122,36 @@
 		}
 	}
 
+	function updatePlaybackCarts(frame: PlaybackFrame | null): void {
+		if (!cy) return;
+
+		cy.elements('.cart-node').remove();
+		cy.elements('edge').removeClass('congested');
+
+		if (!frame || frame.cartStates.length === 0) return;
+
+		const cartElements: ElementDefinition[] = frame.cartStates.map((cartState) => ({
+			group: 'nodes',
+			data: {
+				id: `cart_${cartState.cartId}`,
+				label: cartState.cartName,
+				cartColor: cartState.color,
+				isCart: true
+			},
+			position: { x: cartState.x, y: cartState.y },
+			classes: 'cart-node'
+		}));
+
+		cy.add(cartElements);
+
+		frame.congestedEdges.forEach((congested) => {
+			const edge = cy!.$id(congested.edgeId);
+			if (edge.length > 0) {
+				edge.addClass('congested');
+			}
+		});
+	}
+
 	const cyStyles = [
 		{
 			selector: 'node',
@@ -181,6 +218,32 @@
 			style: {
 				'line-color': '#22c55e',
 				width: 6
+			}
+		},
+		{
+			selector: 'edge.congested',
+			style: {
+				'line-color': '#ef4444',
+				width: 6,
+				'line-style': 'solid'
+			}
+		},
+		{
+			selector: 'node.cart-node',
+			style: {
+				'background-color': 'data(cartColor)',
+				'border-color': '#1f2937',
+				'border-width': 2,
+				label: 'data(label)',
+				'text-valign': 'bottom',
+				'text-halign': 'center',
+				'font-size': 10,
+				color: '#1f2937',
+				width: 24,
+				height: 24,
+				'text-outline-width': 2,
+				'text-outline-color': '#ffffff',
+				'z-index': 9999
 			}
 		}
 	];
@@ -302,6 +365,10 @@
 
 	$: if (addMode) {
 		firstNodeForEdge = null;
+	}
+
+	$: if (cy) {
+		updatePlaybackCarts(playbackFrame);
 	}
 </script>
 
