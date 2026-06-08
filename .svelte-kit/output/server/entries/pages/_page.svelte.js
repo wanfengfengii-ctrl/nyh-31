@@ -1,9 +1,14 @@
 import { c as create_ssr_component, b as createEventDispatcher, o as onDestroy, d as add_attribute, f as each, e as escape, s as subscribe, h as get_store_value, v as validate_component } from "../../chunks/ssr.js";
 import "cytoscape";
 import { d as derived, w as writable } from "../../chunks/index.js";
-function calculateShortestPath(nodes2, edges2, sourceId, targetId) {
-  const nodeMap = /* @__PURE__ */ new Map();
-  nodes2.forEach((n) => nodeMap.set(n.id, n));
+function getEdgeById(edges2, edgeId) {
+  return edges2.find((e) => e.id === edgeId);
+}
+function buildNodeMap(nodes2) {
+  return new Map(nodes2.map((n) => [n.id, n]));
+}
+function buildAdjacencyList(nodes2, edges2) {
+  const nodeMap = buildNodeMap(nodes2);
   const adjacency = /* @__PURE__ */ new Map();
   nodes2.forEach((n) => adjacency.set(n.id, []));
   edges2.forEach((edge) => {
@@ -16,14 +21,123 @@ function calculateShortestPath(nodes2, edges2, sourceId, targetId) {
     adjacency.get(edge.source)?.push({
       nodeId: edge.target,
       edgeId: edge.id,
-      length: edge.length
+      length: edge.length,
+      isSwitch: edge.isSwitch
     });
     adjacency.get(edge.target)?.push({
       nodeId: edge.source,
       edgeId: edge.id,
-      length: edge.length
+      length: edge.length,
+      isSwitch: edge.isSwitch
     });
   });
+  return adjacency;
+}
+function buildFullAdjacencyList(nodes2, edges2) {
+  const adjacency = /* @__PURE__ */ new Map();
+  nodes2.forEach((n) => adjacency.set(n.id, []));
+  edges2.forEach((edge) => {
+    adjacency.get(edge.source)?.push({
+      nodeId: edge.target,
+      edgeId: edge.id,
+      length: edge.length,
+      isSwitch: edge.isSwitch
+    });
+    adjacency.get(edge.target)?.push({
+      nodeId: edge.source,
+      edgeId: edge.id,
+      length: edge.length,
+      isSwitch: edge.isSwitch
+    });
+  });
+  return adjacency;
+}
+function createOccupancyTable() {
+  return {
+    edgeOccupancies: /* @__PURE__ */ new Map(),
+    nodeOccupancies: /* @__PURE__ */ new Map()
+  };
+}
+function addEdgeOccupancy(table, edgeId, start, end, cartId) {
+  if (!table.edgeOccupancies.has(edgeId)) {
+    table.edgeOccupancies.set(edgeId, []);
+  }
+  table.edgeOccupancies.get(edgeId).push({ start, end, cartId });
+  table.edgeOccupancies.get(edgeId).sort((a, b) => a.start - b.start);
+}
+function addNodeOccupancy(table, nodeId, start, end, cartId) {
+  if (!table.nodeOccupancies.has(nodeId)) {
+    table.nodeOccupancies.set(nodeId, []);
+  }
+  table.nodeOccupancies.get(nodeId).push({ start, end, cartId });
+  table.nodeOccupancies.get(nodeId).sort((a, b) => a.start - b.start);
+}
+function findEarliestAvailableTime(occupancies, desiredStart, duration, buffer = 0.5) {
+  if (!occupancies || occupancies.length === 0) {
+    return desiredStart;
+  }
+  let earliestStart = desiredStart;
+  for (const occ of occupancies) {
+    const occStart = occ.start - buffer;
+    const occEnd = occ.end + buffer;
+    if (earliestStart + duration <= occStart) {
+      return earliestStart;
+    }
+    if (earliestStart < occEnd) {
+      earliestStart = occEnd;
+    }
+  }
+  return earliestStart;
+}
+function calculateTravelTime(length, speed) {
+  if (speed <= 0) return Infinity;
+  return length / speed;
+}
+function timeOverlap(start1, end1, start2, end2) {
+  return start1 < end2 && start2 < end1;
+}
+function findReachableNodes(nodes2, edges2, sourceId) {
+  const nodeMap = buildNodeMap(nodes2);
+  const adjacency = buildFullAdjacencyList(nodes2, edges2);
+  const reachable = /* @__PURE__ */ new Set();
+  const queue = [sourceId];
+  reachable.add(sourceId);
+  while (queue.length > 0) {
+    const current = queue.shift();
+    const neighbors = adjacency.get(current) || [];
+    neighbors.forEach((n) => {
+      if (!reachable.has(n.nodeId)) {
+        const node = nodeMap.get(n.nodeId);
+        const edge = getEdgeById(edges2, n.edgeId);
+        const isPassable = node && !node.blocked && edge && edge.enabled && (!edge.isSwitch || edge.switchActive);
+        if (isPassable) {
+          reachable.add(n.nodeId);
+          queue.push(n.nodeId);
+        }
+      }
+    });
+  }
+  return reachable;
+}
+function findBrokenNodes(nodes2, edges2, sourceId) {
+  const reachableFromSource = findReachableNodes(nodes2, edges2, sourceId);
+  const adjacency = buildFullAdjacencyList(nodes2, edges2);
+  const brokenNodes = [];
+  reachableFromSource.forEach((nodeId) => {
+    const neighbors = adjacency.get(nodeId) || [];
+    neighbors.forEach((neighbor) => {
+      if (!reachableFromSource.has(neighbor.nodeId)) {
+        if (!brokenNodes.includes(nodeId)) {
+          brokenNodes.push(nodeId);
+        }
+      }
+    });
+  });
+  return brokenNodes;
+}
+function calculateShortestPath$1(nodes2, edges2, sourceId, targetId) {
+  buildNodeMap(nodes2);
+  const adjacency = buildAdjacencyList(nodes2, edges2);
   const distances = /* @__PURE__ */ new Map();
   const previous = /* @__PURE__ */ new Map();
   const visited = /* @__PURE__ */ new Set();
@@ -79,7 +193,7 @@ function calculateShortestPath(nodes2, edges2, sourceId, targetId) {
   pathNodes.unshift(sourceId);
   let switchCount = 0;
   pathEdges.forEach((edgeId) => {
-    const edge = edges2.find((e) => e.id === edgeId);
+    const edge = getEdgeById(edges2, edgeId);
     if (edge?.isSwitch) switchCount++;
   });
   return {
@@ -92,317 +206,9 @@ function calculateShortestPath(nodes2, edges2, sourceId, targetId) {
     hasPath: true
   };
 }
-function findBrokenNodes(nodes2, edges2, sourceId, targetId) {
-  const nodeMap = /* @__PURE__ */ new Map();
-  nodes2.forEach((n) => nodeMap.set(n.id, n));
-  const adjacency = /* @__PURE__ */ new Map();
-  nodes2.forEach((n) => adjacency.set(n.id, []));
-  edges2.forEach((edge) => {
-    const sourceNode = nodeMap.get(edge.source);
-    const targetNode = nodeMap.get(edge.target);
-    if (!sourceNode || !targetNode) return;
-    adjacency.get(edge.source)?.push(edge.target);
-    adjacency.get(edge.target)?.push(edge.source);
-  });
-  const reachableFromSource = /* @__PURE__ */ new Set();
-  const queue = [sourceId];
-  reachableFromSource.add(sourceId);
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const neighbors = adjacency.get(current) || [];
-    neighbors.forEach((n) => {
-      if (!reachableFromSource.has(n)) {
-        const node = nodeMap.get(n);
-        const edge = edges2.find(
-          (e) => e.source === current && e.target === n || e.target === current && e.source === n
-        );
-        const isPassable = node && !node.blocked && edge && edge.enabled && (!edge.isSwitch || edge.switchActive);
-        if (isPassable) {
-          reachableFromSource.add(n);
-          queue.push(n);
-        }
-      }
-    });
-  }
-  const brokenNodes = [];
-  reachableFromSource.forEach((nodeId) => {
-    const neighbors = adjacency.get(nodeId) || [];
-    neighbors.forEach((neighborId) => {
-      if (!reachableFromSource.has(neighborId)) {
-        if (!brokenNodes.includes(nodeId)) {
-          brokenNodes.push(nodeId);
-        }
-      }
-    });
-  });
-  return brokenNodes;
-}
-function createConflictId() {
-  return `conflict_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-}
-function getEdgeById(edges2, edgeId) {
-  return edges2.find((e) => e.id === edgeId);
-}
-function getNodeById(nodes2, nodeId) {
-  return nodes2.find((n) => n.id === nodeId);
-}
-function calculateTravelTime(length, speed) {
-  if (speed <= 0) return Infinity;
-  return length / speed;
-}
-function buildTimedRoute(nodes2, edges2, cart) {
-  const pathResult2 = calculateShortestPath(nodes2, edges2, cart.sourceId, cart.targetId);
-  if (!pathResult2.hasPath) {
-    return {
-      cartId: cart.id,
-      cartName: cart.name,
-      positions: [],
-      totalDistance: 0,
-      totalTime: 0,
-      switchCount: 0,
-      hasPath: false,
-      waitTime: 0
-    };
-  }
-  const positions = [];
-  let currentTime = cart.departureTime;
-  const sourceNode = getNodeById(nodes2, cart.sourceId);
-  if (sourceNode) {
-    positions.push({
-      nodeId: cart.sourceId,
-      edgeId: null,
-      arrivalTime: currentTime,
-      departureTime: currentTime,
-      isSwitch: sourceNode.type === "switch"
-    });
-  }
-  for (let i = 0; i < pathResult2.edges.length; i++) {
-    const edgeId = pathResult2.edges[i];
-    const edge = getEdgeById(edges2, edgeId);
-    const nextNodeId = pathResult2.nodes[i + 1];
-    const nextNode = getNodeById(nodes2, nextNodeId);
-    if (edge && nextNode) {
-      const travelTime = calculateTravelTime(edge.length, cart.speed);
-      const arrivalTime = currentTime + travelTime;
-      positions.push({
-        nodeId: nextNodeId,
-        edgeId,
-        arrivalTime,
-        departureTime: arrivalTime,
-        isSwitch: nextNode.type === "switch"
-      });
-      currentTime = arrivalTime;
-    }
-  }
-  const totalTime = positions.length > 0 ? positions[positions.length - 1].arrivalTime - cart.departureTime : 0;
-  return {
-    cartId: cart.id,
-    cartName: cart.name,
-    positions,
-    totalDistance: pathResult2.totalDistance,
-    totalTime,
-    switchCount: pathResult2.switchCount,
-    hasPath: true,
-    waitTime: 0
-  };
-}
-function timeOverlap(start1, end1, start2, end2) {
-  return start1 < end2 && start2 < end1;
-}
-function getEdgeOccupancyTime(position, prevPosition) {
-  if (!prevPosition || !position.edgeId) return null;
-  return {
-    startTime: prevPosition.departureTime,
-    endTime: position.arrivalTime
-  };
-}
-function getNodeOccupancyTime(position) {
-  const buffer = 1;
-  return {
-    startTime: position.arrivalTime - buffer,
-    endTime: position.departureTime + buffer
-  };
-}
-function detectConflicts(routes, edges2, carts2) {
-  const conflicts = [];
-  const cartMap = new Map(carts2.map((c) => [c.id, c]));
-  for (let i = 0; i < routes.length; i++) {
-    for (let j = i + 1; j < routes.length; j++) {
-      const route1 = routes[i];
-      const route2 = routes[j];
-      if (!route1.hasPath || !route2.hasPath) continue;
-      const cart1 = cartMap.get(route1.cartId);
-      const cart2 = cartMap.get(route2.cartId);
-      if (!cart1 || !cart2) continue;
-      detectEdgeConflicts(route1, route2, edges2, cart1, cart2, conflicts);
-      detectNodeConflicts(route1, route2, cart1, cart2, conflicts);
-      detectSwitchConflicts(route1, route2, cart1, cart2, conflicts);
-    }
-  }
-  return conflicts;
-}
-function detectEdgeConflicts(route1, route2, edges2, cart1, cart2, conflicts) {
-  for (let i = 1; i < route1.positions.length; i++) {
-    const pos1 = route1.positions[i];
-    const prevPos1 = route1.positions[i - 1];
-    const occupancy1 = getEdgeOccupancyTime(pos1, prevPos1);
-    if (!occupancy1 || !pos1.edgeId) continue;
-    for (let j = 1; j < route2.positions.length; j++) {
-      const pos2 = route2.positions[j];
-      const prevPos2 = route2.positions[j - 1];
-      const occupancy2 = getEdgeOccupancyTime(pos2, prevPos2);
-      if (!occupancy2 || !pos2.edgeId) continue;
-      if (pos1.edgeId === pos2.edgeId) {
-        if (timeOverlap(occupancy1.startTime, occupancy1.endTime, occupancy2.startTime, occupancy2.endTime)) {
-          const edge = getEdgeById(edges2, pos1.edgeId);
-          const duration = Math.min(occupancy1.endTime, occupancy2.endTime) - Math.max(occupancy1.startTime, occupancy2.startTime);
-          const severity = duration > 10 ? "high" : duration > 5 ? "medium" : "low";
-          conflicts.push({
-            id: createConflictId(),
-            type: "edge",
-            edgeId: pos1.edgeId,
-            cart1Id: cart1.id,
-            cart2Id: cart2.id,
-            cart1Name: cart1.name,
-            cart2Name: cart2.name,
-            startTime: Math.max(occupancy1.startTime, occupancy2.startTime),
-            endTime: Math.min(occupancy1.endTime, occupancy2.endTime),
-            severity,
-            description: `${cart1.name} 与 ${cart2.name} 在轨道 ${edge ? edge.id.slice(0, 8) : pos1.edgeId.slice(0, 8)} 上发生路径冲突，重叠时长约 ${duration.toFixed(1)} 单位时间`
-          });
-        }
-      }
-    }
-  }
-}
-function detectNodeConflicts(route1, route2, cart1, cart2, conflicts) {
-  for (const pos1 of route1.positions) {
-    const occupancy1 = getNodeOccupancyTime(pos1);
-    for (const pos2 of route2.positions) {
-      if (pos1.nodeId === pos2.nodeId) {
-        const occupancy2 = getNodeOccupancyTime(pos2);
-        if (timeOverlap(occupancy1.startTime, occupancy1.endTime, occupancy2.startTime, occupancy2.endTime)) {
-          const isSameStart = pos1.nodeId === cart1.sourceId && pos1.nodeId === cart2.sourceId;
-          const isSameEnd = pos1.nodeId === cart1.targetId && pos1.nodeId === cart2.targetId;
-          if (!isSameStart && !isSameEnd) {
-            const duration = Math.min(occupancy1.endTime, occupancy2.endTime) - Math.max(occupancy1.startTime, occupancy2.startTime);
-            const severity = duration > 8 ? "high" : duration > 4 ? "medium" : "low";
-            conflicts.push({
-              id: createConflictId(),
-              type: "node",
-              nodeId: pos1.nodeId,
-              cart1Id: cart1.id,
-              cart2Id: cart2.id,
-              cart1Name: cart1.name,
-              cart2Name: cart2.name,
-              startTime: Math.max(occupancy1.startTime, occupancy2.startTime),
-              endTime: Math.min(occupancy1.endTime, occupancy2.endTime),
-              severity,
-              description: `${cart1.name} 与 ${cart2.name} 在节点 ${pos1.nodeId.slice(0, 8)} 发生交汇冲突`
-            });
-          }
-        }
-      }
-    }
-  }
-}
-function detectSwitchConflicts(route1, route2, cart1, cart2, conflicts) {
-  for (const pos1 of route1.positions) {
-    if (!pos1.isSwitch) continue;
-    const occupancy1 = getNodeOccupancyTime(pos1);
-    for (const pos2 of route2.positions) {
-      if (!pos2.isSwitch) continue;
-      if (pos1.nodeId !== pos2.nodeId) continue;
-      const occupancy2 = getNodeOccupancyTime(pos2);
-      if (timeOverlap(occupancy1.startTime, occupancy1.endTime, occupancy2.startTime, occupancy2.endTime)) {
-        const severity = "high";
-        const existingConflict = conflicts.find(
-          (c) => c.type === "node" && c.nodeId === pos1.nodeId && (c.cart1Id === cart1.id && c.cart2Id === cart2.id || c.cart1Id === cart2.id && c.cart2Id === cart1.id)
-        );
-        if (!existingConflict) {
-          conflicts.push({
-            id: createConflictId(),
-            type: "switch",
-            nodeId: pos1.nodeId,
-            cart1Id: cart1.id,
-            cart2Id: cart2.id,
-            cart1Name: cart1.name,
-            cart2Name: cart2.name,
-            startTime: Math.max(occupancy1.startTime, occupancy2.startTime),
-            endTime: Math.min(occupancy1.endTime, occupancy2.endTime),
-            severity,
-            description: `${cart1.name} 与 ${cart2.name} 在岔道节点 ${pos1.nodeId.slice(0, 8)} 发生岔道争用冲突，需要协调通过顺序`
-          });
-        }
-      }
-    }
-  }
-}
-function createOccupancyTable() {
-  return {
-    edgeOccupancies: /* @__PURE__ */ new Map(),
-    nodeOccupancies: /* @__PURE__ */ new Map()
-  };
-}
-function addEdgeOccupancy(table, edgeId, start, end, cartId) {
-  if (!table.edgeOccupancies.has(edgeId)) {
-    table.edgeOccupancies.set(edgeId, []);
-  }
-  table.edgeOccupancies.get(edgeId).push({ start, end, cartId });
-  table.edgeOccupancies.get(edgeId).sort((a, b) => a.start - b.start);
-}
-function addNodeOccupancy(table, nodeId, start, end, cartId) {
-  if (!table.nodeOccupancies.has(nodeId)) {
-    table.nodeOccupancies.set(nodeId, []);
-  }
-  table.nodeOccupancies.get(nodeId).push({ start, end, cartId });
-  table.nodeOccupancies.get(nodeId).sort((a, b) => a.start - b.start);
-}
-function findEarliestAvailableTime(occupancies, desiredStart, duration, buffer = 0.5) {
-  if (!occupancies || occupancies.length === 0) {
-    return desiredStart;
-  }
-  let earliestStart = desiredStart;
-  for (const occ of occupancies) {
-    const occStart = occ.start - buffer;
-    const occEnd = occ.end + buffer;
-    if (earliestStart + duration <= occStart) {
-      return earliestStart;
-    }
-    if (earliestStart < occEnd) {
-      earliestStart = occEnd;
-    }
-  }
-  return earliestStart;
-}
-function buildAdjacencyList(nodes2, edges2) {
-  const adjacency = /* @__PURE__ */ new Map();
-  nodes2.forEach((n) => adjacency.set(n.id, []));
-  edges2.forEach((edge) => {
-    if (!edge.enabled) return;
-    if (edge.isSwitch && !edge.switchActive) return;
-    const sourceNode = nodes2.find((n) => n.id === edge.source);
-    const targetNode = nodes2.find((n) => n.id === edge.target);
-    if (!sourceNode || !targetNode) return;
-    if (sourceNode.blocked || targetNode.blocked) return;
-    adjacency.get(edge.source)?.push({
-      nodeId: edge.target,
-      edgeId: edge.id,
-      length: edge.length,
-      isSwitch: edge.isSwitch
-    });
-    adjacency.get(edge.target)?.push({
-      nodeId: edge.source,
-      edgeId: edge.id,
-      length: edge.length,
-      isSwitch: edge.isSwitch
-    });
-  });
-  return adjacency;
-}
 function findTimeWindowPath(nodes2, edges2, cart, occupancyTable) {
   const adjacency = buildAdjacencyList(nodes2, edges2);
-  const nodeMap = new Map(nodes2.map((n) => [n.id, n]));
+  const nodeMap = buildNodeMap(nodes2);
   const nodeBuffer = 0.5;
   const edgeBuffer = 0.3;
   const distances = /* @__PURE__ */ new Map();
@@ -421,16 +227,7 @@ function findTimeWindowPath(nodes2, edges2, cart, occupancyTable) {
   });
   const sourceNode = nodeMap.get(cart.sourceId);
   if (!sourceNode || sourceNode.blocked) {
-    return {
-      cartId: cart.id,
-      cartName: cart.name,
-      positions: [],
-      totalDistance: 0,
-      totalTime: 0,
-      switchCount: 0,
-      hasPath: false,
-      waitTime: 0
-    };
+    return createEmptyRoute(cart);
   }
   const initialDeparture = findEarliestAvailableTime(
     occupancyTable.nodeOccupancies.get(cart.sourceId),
@@ -494,16 +291,7 @@ function findTimeWindowPath(nodes2, edges2, cart, occupancyTable) {
   }
   const targetArrival = arrivalTimes.get(cart.targetId);
   if (!targetArrival || targetArrival === Infinity) {
-    return {
-      cartId: cart.id,
-      cartName: cart.name,
-      positions: [],
-      totalDistance: 0,
-      totalTime: 0,
-      switchCount: 0,
-      hasPath: false,
-      waitTime: 0
-    };
+    return createEmptyRoute(cart);
   }
   const positions = [];
   let current = cart.targetId;
@@ -550,6 +338,66 @@ function findTimeWindowPath(nodes2, edges2, cart, occupancyTable) {
     waitTime: totalWaitTime
   };
 }
+function buildTimedRoute(nodes2, edges2, cart) {
+  const pathResult2 = calculateShortestPath$1(nodes2, edges2, cart.sourceId, cart.targetId);
+  if (!pathResult2.hasPath) {
+    return createEmptyRoute(cart);
+  }
+  const positions = [];
+  let currentTime = cart.departureTime;
+  const nodeMap = buildNodeMap(nodes2);
+  const sourceNode = nodeMap.get(cart.sourceId);
+  if (sourceNode) {
+    positions.push({
+      nodeId: cart.sourceId,
+      edgeId: null,
+      arrivalTime: currentTime,
+      departureTime: currentTime,
+      isSwitch: sourceNode.type === "switch"
+    });
+  }
+  for (let i = 0; i < pathResult2.edges.length; i++) {
+    const edgeId = pathResult2.edges[i];
+    const edge = getEdgeById(edges2, edgeId);
+    const nextNodeId = pathResult2.nodes[i + 1];
+    const nextNode = nodeMap.get(nextNodeId);
+    if (edge && nextNode) {
+      const travelTime = calculateTravelTime(edge.length, cart.speed);
+      const arrivalTime = currentTime + travelTime;
+      positions.push({
+        nodeId: nextNodeId,
+        edgeId,
+        arrivalTime,
+        departureTime: arrivalTime,
+        isSwitch: nextNode.type === "switch"
+      });
+      currentTime = arrivalTime;
+    }
+  }
+  const totalTime = positions.length > 0 ? positions[positions.length - 1].arrivalTime - cart.departureTime : 0;
+  return {
+    cartId: cart.id,
+    cartName: cart.name,
+    positions,
+    totalDistance: pathResult2.totalDistance,
+    totalTime,
+    switchCount: pathResult2.switchCount,
+    hasPath: true,
+    waitTime: 0
+  };
+}
+function createEmptyRoute(cart) {
+  return {
+    cartId: cart.id,
+    cartName: cart.name,
+    positions: [],
+    totalDistance: 0,
+    totalTime: 0,
+    switchCount: 0,
+    hasPath: false,
+    waitTime: 0
+  };
+}
 function addRouteToOccupancyTable(table, route, cartId) {
   const positions = route.positions;
   if (positions.length < 2) return;
@@ -568,7 +416,157 @@ function addRouteToOccupancyTable(table, route, cartId) {
     }
   }
 }
-function calculateDispatch(nodes2, edges2, carts2) {
+function calculateShortestPath(nodes2, edges2, sourceId, targetId) {
+  return calculateShortestPath$1(nodes2, edges2, sourceId, targetId);
+}
+function createConflictId() {
+  return `conflict_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+function getEdgeOccupancyTime(position, prevPosition) {
+  if (!prevPosition || !position.edgeId) return null;
+  return {
+    startTime: prevPosition.departureTime,
+    endTime: position.arrivalTime
+  };
+}
+function getNodeOccupancyTime(position) {
+  const buffer = 1;
+  return {
+    startTime: position.arrivalTime - buffer,
+    endTime: position.departureTime + buffer
+  };
+}
+function detectConflicts(routes, edges2, carts2) {
+  const conflicts = [];
+  const cartMap = new Map(carts2.map((c) => [c.id, c]));
+  for (let i = 0; i < routes.length; i++) {
+    for (let j = i + 1; j < routes.length; j++) {
+      const route1 = routes[i];
+      const route2 = routes[j];
+      if (!route1.hasPath || !route2.hasPath) continue;
+      const cart1 = cartMap.get(route1.cartId);
+      const cart2 = cartMap.get(route2.cartId);
+      if (!cart1 || !cart2) continue;
+      detectEdgeConflicts(route1, route2, edges2, cart1, cart2, conflicts);
+      detectNodeConflicts(route1, route2, cart1, cart2, conflicts);
+      detectSwitchConflicts(route1, route2, cart1, cart2, conflicts);
+    }
+  }
+  return conflicts;
+}
+function detectEdgeConflicts(route1, route2, edges2, cart1, cart2, conflicts) {
+  for (let i = 1; i < route1.positions.length; i++) {
+    const pos1 = route1.positions[i];
+    const prevPos1 = route1.positions[i - 1];
+    const occupancy1 = getEdgeOccupancyTime(pos1, prevPos1);
+    if (!occupancy1 || !pos1.edgeId) continue;
+    for (let j = 1; j < route2.positions.length; j++) {
+      const pos2 = route2.positions[j];
+      const prevPos2 = route2.positions[j - 1];
+      const occupancy2 = getEdgeOccupancyTime(pos2, prevPos2);
+      if (!occupancy2 || !pos2.edgeId) continue;
+      if (pos1.edgeId === pos2.edgeId) {
+        if (timeOverlap(
+          occupancy1.startTime,
+          occupancy1.endTime,
+          occupancy2.startTime,
+          occupancy2.endTime
+        )) {
+          const edge = getEdgeById(edges2, pos1.edgeId);
+          const duration = Math.min(occupancy1.endTime, occupancy2.endTime) - Math.max(occupancy1.startTime, occupancy2.startTime);
+          const severity = duration > 10 ? "high" : duration > 5 ? "medium" : "low";
+          conflicts.push({
+            id: createConflictId(),
+            type: "edge",
+            edgeId: pos1.edgeId,
+            cart1Id: cart1.id,
+            cart2Id: cart2.id,
+            cart1Name: cart1.name,
+            cart2Name: cart2.name,
+            startTime: Math.max(occupancy1.startTime, occupancy2.startTime),
+            endTime: Math.min(occupancy1.endTime, occupancy2.endTime),
+            severity,
+            description: `${cart1.name} 与 ${cart2.name} 在轨道 ${edge ? edge.id.slice(0, 8) : pos1.edgeId.slice(0, 8)} 上发生路径冲突，重叠时长约 ${duration.toFixed(1)} 单位时间`
+          });
+        }
+      }
+    }
+  }
+}
+function detectNodeConflicts(route1, route2, cart1, cart2, conflicts) {
+  for (const pos1 of route1.positions) {
+    const occupancy1 = getNodeOccupancyTime(pos1);
+    for (const pos2 of route2.positions) {
+      if (pos1.nodeId === pos2.nodeId) {
+        const occupancy2 = getNodeOccupancyTime(pos2);
+        if (timeOverlap(
+          occupancy1.startTime,
+          occupancy1.endTime,
+          occupancy2.startTime,
+          occupancy2.endTime
+        )) {
+          const isSameStart = pos1.nodeId === cart1.sourceId && pos1.nodeId === cart2.sourceId;
+          const isSameEnd = pos1.nodeId === cart1.targetId && pos1.nodeId === cart2.targetId;
+          if (!isSameStart && !isSameEnd) {
+            const duration = Math.min(occupancy1.endTime, occupancy2.endTime) - Math.max(occupancy1.startTime, occupancy2.startTime);
+            const severity = duration > 8 ? "high" : duration > 4 ? "medium" : "low";
+            conflicts.push({
+              id: createConflictId(),
+              type: "node",
+              nodeId: pos1.nodeId,
+              cart1Id: cart1.id,
+              cart2Id: cart2.id,
+              cart1Name: cart1.name,
+              cart2Name: cart2.name,
+              startTime: Math.max(occupancy1.startTime, occupancy2.startTime),
+              endTime: Math.min(occupancy1.endTime, occupancy2.endTime),
+              severity,
+              description: `${cart1.name} 与 ${cart2.name} 在节点 ${pos1.nodeId.slice(0, 8)} 发生交汇冲突`
+            });
+          }
+        }
+      }
+    }
+  }
+}
+function detectSwitchConflicts(route1, route2, cart1, cart2, conflicts) {
+  for (const pos1 of route1.positions) {
+    if (!pos1.isSwitch) continue;
+    const occupancy1 = getNodeOccupancyTime(pos1);
+    for (const pos2 of route2.positions) {
+      if (!pos2.isSwitch) continue;
+      if (pos1.nodeId !== pos2.nodeId) continue;
+      const occupancy2 = getNodeOccupancyTime(pos2);
+      if (timeOverlap(
+        occupancy1.startTime,
+        occupancy1.endTime,
+        occupancy2.startTime,
+        occupancy2.endTime
+      )) {
+        const severity = "high";
+        const existingConflict = conflicts.find(
+          (c) => c.type === "node" && c.nodeId === pos1.nodeId && (c.cart1Id === cart1.id && c.cart2Id === cart2.id || c.cart1Id === cart2.id && c.cart2Id === cart1.id)
+        );
+        if (!existingConflict) {
+          conflicts.push({
+            id: createConflictId(),
+            type: "switch",
+            nodeId: pos1.nodeId,
+            cart1Id: cart1.id,
+            cart2Id: cart2.id,
+            cart1Name: cart1.name,
+            cart2Name: cart2.name,
+            startTime: Math.max(occupancy1.startTime, occupancy2.startTime),
+            endTime: Math.min(occupancy1.endTime, occupancy2.endTime),
+            severity,
+            description: `${cart1.name} 与 ${cart2.name} 在岔道节点 ${pos1.nodeId.slice(0, 8)} 发生岔道争用冲突，需要协调通过顺序`
+          });
+        }
+      }
+    }
+  }
+}
+function calculateDispatch$1(nodes2, edges2, carts2) {
   const sortedCarts = [...carts2].sort((a, b) => b.priority - a.priority);
   const occupancyTable = createOccupancyTable();
   const routes = [];
@@ -581,16 +579,7 @@ function calculateDispatch(nodes2, edges2, carts2) {
   }
   const finalRoutes = carts2.map((cart) => {
     const route = routes.find((r) => r.cartId === cart.id);
-    return route || {
-      cartId: cart.id,
-      cartName: cart.name,
-      positions: [],
-      totalDistance: 0,
-      totalTime: 0,
-      switchCount: 0,
-      hasPath: false,
-      waitTime: 0
-    };
+    return route || createEmptyRoute(cart);
   });
   const conflicts = detectConflicts(finalRoutes, edges2, carts2);
   const totalTime = Math.max(...finalRoutes.map((r) => r.positions.length > 0 ? r.positions[r.positions.length - 1].arrivalTime : 0));
@@ -613,187 +602,6 @@ function calculateDispatch(nodes2, edges2, carts2) {
     congestionRisk,
     hasAllPaths
   };
-}
-function generatePlaybackFrames(nodes2, edges2, carts2, dispatchResult, frameInterval = 0.5) {
-  const frames = [];
-  const nodeMap = new Map(nodes2.map((n) => [n.id, n]));
-  new Map(edges2.map((e) => [e.id, e]));
-  const cartMap = new Map(carts2.map((c) => [c.id, c]));
-  const triggeredEvents = /* @__PURE__ */ new Set();
-  if (dispatchResult.routes.length === 0) return frames;
-  const maxTime = Math.max(
-    ...dispatchResult.routes.map(
-      (r) => r.positions.length > 0 ? r.positions[r.positions.length - 1].departureTime : 0
-    )
-  );
-  if (!isFinite(maxTime) || maxTime <= 0) return frames;
-  for (let time = 0; time <= maxTime + frameInterval; time += frameInterval) {
-    const cartStates = [];
-    const congestedEdges = /* @__PURE__ */ new Map();
-    const events = [];
-    for (const route of dispatchResult.routes) {
-      const cart = cartMap.get(route.cartId);
-      if (!cart || !route.hasPath || route.positions.length === 0) continue;
-      let isWaiting = false;
-      let waitRemaining = 0;
-      let waitNodeLabel = "";
-      let x = 0;
-      let y = 0;
-      let currentNodeId = "";
-      let nextNodeId = null;
-      let progress = 0;
-      const positions = route.positions;
-      if (time < positions[0].arrivalTime) {
-        const node = nodeMap.get(positions[0].nodeId);
-        if (node) {
-          x = node.x;
-          y = node.y;
-          currentNodeId = node.id;
-          isWaiting = true;
-          waitRemaining = positions[0].arrivalTime - time;
-          waitNodeLabel = node.label;
-        }
-      } else {
-        let found = false;
-        for (let i = 0; i < positions.length; i++) {
-          const pos = positions[i];
-          if (time >= pos.arrivalTime && time < pos.departureTime) {
-            const node = nodeMap.get(pos.nodeId);
-            if (node) {
-              x = node.x;
-              y = node.y;
-              currentNodeId = node.id;
-              isWaiting = true;
-              waitRemaining = pos.departureTime - time;
-              waitNodeLabel = node.label;
-            }
-            if (i < positions.length - 1) {
-              nextNodeId = positions[i + 1].nodeId;
-            }
-            progress = 0;
-            found = true;
-            const eventKey = `wait_start_${cart.id}_${i}`;
-            if (!triggeredEvents.has(eventKey) && time >= pos.arrivalTime && time < pos.arrivalTime + frameInterval) {
-              triggeredEvents.add(eventKey);
-              events.push({
-                time,
-                type: "wait",
-                cartId: cart.id,
-                cartName: cart.name,
-                description: `${cart.name} 在节点 ${node?.label || pos.nodeId.slice(0, 8)} 等待 ${waitRemaining.toFixed(1)} 单位时间`
-              });
-            }
-            break;
-          }
-          if (i < positions.length - 1) {
-            const nextPos = positions[i + 1];
-            if (time >= pos.departureTime && time <= nextPos.arrivalTime) {
-              const currNode = nodeMap.get(pos.nodeId);
-              const nextNode = nodeMap.get(nextPos.nodeId);
-              if (currNode && nextNode) {
-                const segmentDuration = nextPos.arrivalTime - pos.departureTime;
-                progress = segmentDuration > 0 ? (time - pos.departureTime) / segmentDuration : 0;
-                progress = Math.max(0, Math.min(1, progress));
-                x = currNode.x + (nextNode.x - currNode.x) * progress;
-                y = currNode.y + (nextNode.y - currNode.y) * progress;
-                currentNodeId = pos.nodeId;
-                nextNodeId = nextPos.nodeId;
-                isWaiting = false;
-                waitRemaining = 0;
-              }
-              if (nextPos.edgeId) {
-                const currentCount = congestedEdges.get(nextPos.edgeId) || 0;
-                congestedEdges.set(nextPos.edgeId, currentCount + 1);
-              }
-              found = true;
-              break;
-            }
-          }
-        }
-        if (!found) {
-          const lastPos = positions[positions.length - 1];
-          const lastNode = nodeMap.get(lastPos.nodeId);
-          if (lastNode) {
-            x = lastNode.x;
-            y = lastNode.y;
-            currentNodeId = lastPos.nodeId;
-            nextNodeId = null;
-            progress = 1;
-            isWaiting = false;
-          }
-        }
-      }
-      const departEventKey = `depart_${cart.id}`;
-      if (time >= positions[0].departureTime && time < positions[0].departureTime + frameInterval && !triggeredEvents.has(departEventKey)) {
-        triggeredEvents.add(departEventKey);
-        events.push({
-          time,
-          type: "depart",
-          cartId: cart.id,
-          cartName: cart.name,
-          description: `${cart.name} 从起点出发`
-        });
-      }
-      for (let i = 1; i < positions.length; i++) {
-        const pos = positions[i];
-        const arriveEventKey = `arrive_${cart.id}_${i}`;
-        if (time >= pos.arrivalTime && time < pos.arrivalTime + frameInterval && !triggeredEvents.has(arriveEventKey)) {
-          triggeredEvents.add(arriveEventKey);
-          const node = nodeMap.get(pos.nodeId);
-          events.push({
-            time,
-            type: "arrive",
-            cartId: cart.id,
-            cartName: cart.name,
-            description: `${cart.name} 到达节点 ${node?.label || pos.nodeId.slice(0, 8)}`
-          });
-          if (pos.isSwitch) {
-            events.push({
-              time,
-              type: "switch",
-              cartId: cart.id,
-              cartName: cart.name,
-              description: `${cart.name} 经过岔道节点`
-            });
-          }
-        }
-      }
-      cartStates.push({
-        cartId: cart.id,
-        cartName: cart.name,
-        x,
-        y,
-        currentNodeId,
-        nextNodeId,
-        progress,
-        isWaiting,
-        waitRemaining,
-        waitNodeLabel,
-        color: cart.color
-      });
-    }
-    for (const conflict of dispatchResult.conflicts) {
-      const conflictEventKey = `conflict_${conflict.id}`;
-      if (time >= conflict.startTime && time < conflict.startTime + frameInterval && !triggeredEvents.has(conflictEventKey)) {
-        triggeredEvents.add(conflictEventKey);
-        events.push({
-          time,
-          type: "conflict",
-          cartId: conflict.cart1Id,
-          cartName: conflict.cart1Name,
-          description: `⚠ ${conflict.description}`
-        });
-      }
-    }
-    const congestedEdgesList = Array.from(congestedEdges.entries()).filter(([, count]) => count > 1).map(([edgeId, count]) => ({ edgeId, level: count }));
-    frames.push({
-      time,
-      cartStates,
-      congestedEdges: congestedEdgesList,
-      events
-    });
-  }
-  return frames;
 }
 function applyFaultsToNetwork(nodes2, edges2, faults2, currentTime = Infinity) {
   const modifiedNodes = [...nodes2];
@@ -869,7 +677,7 @@ function expandImpactToNeighbors(nodeId, nodes2, edges2, depth, severity) {
     currentLevel = nextLevel;
   }
 }
-function assessFaultImpact(nodes2, edges2, carts2, fault) {
+function assessFaultImpact$1(nodes2, edges2, carts2, fault) {
   const originalRoutes = /* @__PURE__ */ new Map();
   carts2.forEach((cart) => {
     const route = buildTimedRoute(nodes2, edges2, cart);
@@ -888,7 +696,7 @@ function assessFaultImpact(nodes2, edges2, carts2, fault) {
     const faultRoute = buildTimedRoute(faultNodes, faultEdges, cart);
     const isAffected = !faultRoute.hasPath || faultRoute.totalTime > originalRoute.totalTime * 1.05 || faultRoute.totalDistance > originalRoute.totalDistance * 1.05;
     if (isAffected) {
-      const alternativePathResult = calculateShortestPath(
+      const alternativePathResult = calculateShortestPath$1(
         faultNodes,
         faultEdges,
         cart.sourceId,
@@ -935,9 +743,9 @@ function assessFaultImpact(nodes2, edges2, carts2, fault) {
   };
 }
 function assessMultipleFaultsImpact(nodes2, edges2, carts2, faults2) {
-  return faults2.map((fault) => assessFaultImpact(nodes2, edges2, carts2, fault));
+  return faults2.map((fault) => assessFaultImpact$1(nodes2, edges2, carts2, fault));
 }
-function calculateRepairPriorities(nodes2, edges2, carts2, faults2) {
+function calculateRepairPriorities$1(nodes2, edges2, carts2, faults2) {
   const impactResults = assessMultipleFaultsImpact(nodes2, edges2, carts2, faults2);
   const priorityItems = faults2.map((fault) => {
     const impact = impactResults.find((ir) => ir.faultId === fault.id);
@@ -958,15 +766,15 @@ function calculateRepairPriorities(nodes2, edges2, carts2, faults2) {
   });
   return priorityItems.sort((a, b) => b.priority - a.priority);
 }
-function compareFaultScenarios(nodes2, edges2, carts2, faults2) {
-  const beforeFault = calculateDispatch(nodes2, edges2, carts2);
+function compareFaultScenarios$1(nodes2, edges2, carts2, faults2) {
+  const beforeFault = calculateDispatch$1(nodes2, edges2, carts2);
   const { nodes: faultNodes, edges: faultEdges } = applyFaultsToNetwork(
     nodes2,
     edges2,
     faults2,
     Math.max(...faults2.map((f) => f.occurrenceTime)) + 1
   );
-  const afterFault = calculateDispatch(faultNodes, faultEdges, carts2);
+  const afterFault = calculateDispatch$1(faultNodes, faultEdges, carts2);
   const repairedFaults = faults2.map((f) => ({ ...f, status: "resolved" }));
   const { nodes: repairedNodes, edges: repairedEdges } = applyFaultsToNetwork(
     nodes2,
@@ -974,7 +782,7 @@ function compareFaultScenarios(nodes2, edges2, carts2, faults2) {
     repairedFaults,
     Infinity
   );
-  const afterRepair = calculateDispatch(repairedNodes, repairedEdges, carts2);
+  const afterRepair = calculateDispatch$1(repairedNodes, repairedEdges, carts2);
   const deltaTotalTime = afterFault.totalTime - beforeFault.totalTime;
   const deltaTotalDistance = afterFault.totalDistance - beforeFault.totalDistance;
   const deltaCongestionRisk = afterFault.congestionRisk - beforeFault.congestionRisk;
@@ -995,23 +803,6 @@ function compareFaultScenarios(nodes2, edges2, carts2, faults2) {
     affectedCartCount
   };
 }
-function getFaultStatusAtTime(fault, time) {
-  if (time < fault.occurrenceTime) return "pending";
-  const repairStartTime = fault.repairStartTime ?? fault.occurrenceTime + 5;
-  const repairEndTime = repairStartTime + fault.repairDuration;
-  if (time >= repairEndTime) return "resolved";
-  if (time >= repairStartTime) return "repairing";
-  return "pending";
-}
-function getActiveFaultsAtTime(faults2, time) {
-  return faults2.filter((f) => {
-    const status = getFaultStatusAtTime(f, time);
-    return status === "pending" || status === "repairing";
-  }).map((f) => ({
-    ...f,
-    status: getFaultStatusAtTime(f, time)
-  }));
-}
 function generateEmergencyDetour(nodes2, edges2, carts2, fault) {
   const detourPlans = [];
   let totalFeasible = 0;
@@ -1028,7 +819,7 @@ function generateEmergencyDetour(nodes2, edges2, carts2, fault) {
     if (!originalRoute.hasPath) return;
     const isAffected = !faultRoute.hasPath || faultRoute.totalTime > originalRoute.totalTime * 1.05;
     if (!isAffected) return;
-    const alternativePath = calculateShortestPath(
+    const alternativePath = calculateShortestPath$1(
       faultNodes,
       faultEdges,
       cart.sourceId,
@@ -1096,7 +887,7 @@ function generateEmergencyDetour(nodes2, edges2, carts2, fault) {
 }
 function findNearestSafeNode(cart, originalRoute, fault, nodes2) {
   if (originalRoute.positions.length === 0) return void 0;
-  const nodeMap = new Map(nodes2.map((n) => [n.id, n]));
+  const nodeMap = buildNodeMap(nodes2);
   for (const pos of originalRoute.positions) {
     if (fault.targetType === "node" && pos.nodeId === fault.targetId) {
       break;
@@ -1123,18 +914,18 @@ function generateDetourRecommendation(detourPlans, fault) {
   }
   return "暂无车辆受影响";
 }
-function generateAllEmergencyDetours(nodes2, edges2, carts2, faults2) {
+function generateAllEmergencyDetours$1(nodes2, edges2, carts2, faults2) {
   return faults2.map((fault) => generateEmergencyDetour(nodes2, edges2, carts2, fault));
 }
-function calculateEnhancedComparison(nodes2, edges2, carts2, faults2) {
-  const beforeResult = calculateDispatch(nodes2, edges2, carts2);
+function calculateEnhancedComparison$1(nodes2, edges2, carts2, faults2) {
+  const beforeResult = calculateDispatch$1(nodes2, edges2, carts2);
   const { nodes: faultNodes, edges: faultEdges } = applyFaultsToNetwork(
     nodes2,
     edges2,
     faults2,
     Math.max(...faults2.map((f) => f.occurrenceTime)) + 1
   );
-  const duringResult = calculateDispatch(faultNodes, faultEdges, carts2);
+  const duringResult = calculateDispatch$1(faultNodes, faultEdges, carts2);
   const repairedFaults = faults2.map((f) => ({ ...f, status: "resolved" }));
   const { nodes: repairedNodes, edges: repairedEdges } = applyFaultsToNetwork(
     nodes2,
@@ -1142,7 +933,7 @@ function calculateEnhancedComparison(nodes2, edges2, carts2, faults2) {
     repairedFaults,
     Infinity
   );
-  const afterResult = calculateDispatch(repairedNodes, repairedEdges, carts2);
+  const afterResult = calculateDispatch$1(repairedNodes, repairedEdges, carts2);
   const beforeData = {
     phase: "before",
     totalTime: beforeResult.totalTime,
@@ -1204,10 +995,219 @@ function calculateEnhancedComparison(nodes2, edges2, carts2, faults2) {
     recoveredCartCount: recoveredCount
   };
 }
-function generateIntegratedPlayback(nodes2, edges2, carts2, faults2, frameInterval = 0.5) {
+function getFaultStatusAtTime(fault, time) {
+  if (time < fault.occurrenceTime) return "pending";
+  const repairStartTime = fault.repairStartTime ?? fault.occurrenceTime + 5;
+  const repairEndTime = repairStartTime + fault.repairDuration;
+  if (time >= repairEndTime) return "resolved";
+  if (time >= repairStartTime) return "repairing";
+  return "pending";
+}
+function getActiveFaultsAtTime$1(faults2, time) {
+  return faults2.filter((f) => {
+    const status = getFaultStatusAtTime(f, time);
+    return status === "pending" || status === "repairing";
+  }).map((f) => ({
+    ...f,
+    status: getFaultStatusAtTime(f, time)
+  }));
+}
+function generatePlaybackFrames(nodes2, edges2, carts2, dispatchResult, frameInterval = 0.5) {
+  const frames = [];
+  const nodeMap = buildNodeMap(nodes2);
+  const cartMap = new Map(carts2.map((c) => [c.id, c]));
+  const triggeredEvents = /* @__PURE__ */ new Set();
+  if (dispatchResult.routes.length === 0) return frames;
+  const maxTime = Math.max(
+    ...dispatchResult.routes.map(
+      (r) => r.positions.length > 0 ? r.positions[r.positions.length - 1].departureTime : 0
+    )
+  );
+  if (!isFinite(maxTime) || maxTime <= 0) return frames;
+  for (let time = 0; time <= maxTime + frameInterval; time += frameInterval) {
+    const cartStates = [];
+    const congestedEdges = /* @__PURE__ */ new Map();
+    const events = [];
+    for (const route of dispatchResult.routes) {
+      const cart = cartMap.get(route.cartId);
+      if (!cart || !route.hasPath || route.positions.length === 0) continue;
+      const positionInfo = calculateCartPositionAtTime(
+        route,
+        time,
+        nodeMap
+      );
+      cartStates.push({
+        cartId: cart.id,
+        cartName: cart.name,
+        x: positionInfo.x,
+        y: positionInfo.y,
+        currentNodeId: positionInfo.currentNodeId,
+        nextNodeId: positionInfo.nextNodeId,
+        progress: positionInfo.progress,
+        isWaiting: positionInfo.isWaiting,
+        waitRemaining: positionInfo.waitRemaining,
+        waitNodeLabel: positionInfo.waitNodeLabel,
+        color: cart.color
+      });
+      if (!positionInfo.isWaiting && positionInfo.edgeId) {
+        const currentCount = congestedEdges.get(positionInfo.edgeId) || 0;
+        congestedEdges.set(positionInfo.edgeId, currentCount + 1);
+      }
+      generateCartEvents(route, cart, time, frameInterval, triggeredEvents, events, nodeMap);
+    }
+    for (const conflict of dispatchResult.conflicts) {
+      const conflictEventKey = `conflict_${conflict.id}`;
+      if (time >= conflict.startTime && time < conflict.startTime + frameInterval && !triggeredEvents.has(conflictEventKey)) {
+        triggeredEvents.add(conflictEventKey);
+        events.push({
+          time,
+          type: "conflict",
+          cartId: conflict.cart1Id,
+          cartName: conflict.cart1Name,
+          description: `⚠ ${conflict.description}`
+        });
+      }
+    }
+    const congestedEdgesList = Array.from(congestedEdges.entries()).filter(([, count]) => count > 1).map(([edgeId, count]) => ({ edgeId, level: count }));
+    frames.push({
+      time,
+      cartStates,
+      congestedEdges: congestedEdgesList,
+      events
+    });
+  }
+  return frames;
+}
+function calculateCartPositionAtTime(route, time, nodeMap) {
+  const positions = route.positions;
+  if (time < positions[0].arrivalTime) {
+    const node = nodeMap.get(positions[0].nodeId);
+    return {
+      x: node?.x || 0,
+      y: node?.y || 0,
+      currentNodeId: positions[0].nodeId,
+      nextNodeId: positions.length > 1 ? positions[1].nodeId : null,
+      progress: 0,
+      isWaiting: true,
+      waitRemaining: positions[0].arrivalTime - time,
+      waitNodeLabel: node?.label || "",
+      edgeId: null
+    };
+  }
+  for (let i = 0; i < positions.length; i++) {
+    const pos = positions[i];
+    if (time >= pos.arrivalTime && time < pos.departureTime) {
+      const node = nodeMap.get(pos.nodeId);
+      return {
+        x: node?.x || 0,
+        y: node?.y || 0,
+        currentNodeId: pos.nodeId,
+        nextNodeId: i < positions.length - 1 ? positions[i + 1].nodeId : null,
+        progress: 0,
+        isWaiting: true,
+        waitRemaining: pos.departureTime - time,
+        waitNodeLabel: node?.label || "",
+        edgeId: null
+      };
+    }
+    if (i < positions.length - 1) {
+      const nextPos = positions[i + 1];
+      if (time >= pos.departureTime && time <= nextPos.arrivalTime) {
+        const currNode = nodeMap.get(pos.nodeId);
+        const nextNode = nodeMap.get(nextPos.nodeId);
+        const segmentDuration = nextPos.arrivalTime - pos.departureTime;
+        const progress = segmentDuration > 0 ? (time - pos.departureTime) / segmentDuration : 0;
+        const clampedProgress = Math.max(0, Math.min(1, progress));
+        return {
+          x: currNode && nextNode ? currNode.x + (nextNode.x - currNode.x) * clampedProgress : currNode?.x || 0,
+          y: currNode && nextNode ? currNode.y + (nextNode.y - currNode.y) * clampedProgress : currNode?.y || 0,
+          currentNodeId: pos.nodeId,
+          nextNodeId: nextPos.nodeId,
+          progress: clampedProgress,
+          isWaiting: false,
+          waitRemaining: 0,
+          waitNodeLabel: "",
+          edgeId: nextPos.edgeId || null
+        };
+      }
+    }
+  }
+  const lastPos = positions[positions.length - 1];
+  const lastNode = nodeMap.get(lastPos.nodeId);
+  return {
+    x: lastNode?.x || 0,
+    y: lastNode?.y || 0,
+    currentNodeId: lastPos.nodeId,
+    nextNodeId: null,
+    progress: 1,
+    isWaiting: false,
+    waitRemaining: 0,
+    waitNodeLabel: "",
+    edgeId: null
+  };
+}
+function generateCartEvents(route, cart, time, frameInterval, triggeredEvents, events, nodeMap) {
+  const positions = route.positions;
+  if (positions.length === 0) return;
+  const departEventKey = `depart_${cart.id}`;
+  if (time >= positions[0].departureTime && time < positions[0].departureTime + frameInterval && !triggeredEvents.has(departEventKey)) {
+    triggeredEvents.add(departEventKey);
+    events.push({
+      time,
+      type: "depart",
+      cartId: cart.id,
+      cartName: cart.name,
+      description: `${cart.name} 从起点出发`
+    });
+  }
+  for (let i = 1; i < positions.length; i++) {
+    const pos = positions[i];
+    const arriveEventKey = `arrive_${cart.id}_${i}`;
+    if (time >= pos.arrivalTime && time < pos.arrivalTime + frameInterval && !triggeredEvents.has(arriveEventKey)) {
+      triggeredEvents.add(arriveEventKey);
+      const node = nodeMap.get(pos.nodeId);
+      events.push({
+        time,
+        type: "arrive",
+        cartId: cart.id,
+        cartName: cart.name,
+        description: `${cart.name} 到达节点 ${node?.label || pos.nodeId.slice(0, 8)}`
+      });
+      if (pos.isSwitch) {
+        events.push({
+          time,
+          type: "switch",
+          cartId: cart.id,
+          cartName: cart.name,
+          description: `${cart.name} 经过岔道节点`
+        });
+      }
+    }
+  }
+  for (let i = 0; i < positions.length; i++) {
+    const pos = positions[i];
+    if (time >= pos.arrivalTime && time < pos.departureTime) {
+      const eventKey = `wait_start_${cart.id}_${i}`;
+      if (!triggeredEvents.has(eventKey) && time >= pos.arrivalTime && time < pos.arrivalTime + frameInterval) {
+        triggeredEvents.add(eventKey);
+        const node = nodeMap.get(pos.nodeId);
+        const waitRemaining = pos.departureTime - time;
+        events.push({
+          time,
+          type: "wait",
+          cartId: cart.id,
+          cartName: cart.name,
+          description: `${cart.name} 在节点 ${node?.label || pos.nodeId.slice(0, 8)} 等待 ${waitRemaining.toFixed(1)} 单位时间`
+        });
+      }
+      break;
+    }
+  }
+}
+function generateIntegratedPlayback$1(nodes2, edges2, carts2, faults2, frameInterval = 0.5) {
   const frames = [];
   if (carts2.length === 0 && faults2.length === 0) return frames;
-  const normalResult = calculateDispatch(nodes2, edges2, carts2);
+  const normalResult = calculateDispatch$1(nodes2, edges2, carts2);
   const normalFrames = generatePlaybackFrames(nodes2, edges2, carts2, normalResult, frameInterval);
   const faultTimeEvents = /* @__PURE__ */ new Map();
   faults2.forEach((fault) => {
@@ -1310,7 +1310,7 @@ function generateIntegratedPlayback(nodes2, edges2, carts2, faults2, frameInterv
       time
     );
     if (!dispatchCache || Math.abs(dispatchCache.time - time) > frameInterval * 2 || frameEvents.some((e) => e.type === "fault-occur" || e.type === "repair-complete")) {
-      const dispatchResult = calculateDispatch(frameNodes, frameEdges, carts2);
+      const dispatchResult = calculateDispatch$1(frameNodes, frameEdges, carts2);
       dispatchCache = { time, result: dispatchResult };
     }
     const currentDispatch = dispatchCache.result;
@@ -1376,6 +1376,30 @@ function generateIntegratedPlayback(nodes2, edges2, carts2, faults2, frameInterv
     });
   }
   return frames;
+}
+function calculateDispatch(nodes2, edges2, carts2) {
+  return calculateDispatch$1(nodes2, edges2, carts2);
+}
+function assessFaultImpact(nodes2, edges2, carts2, fault) {
+  return assessFaultImpact$1(nodes2, edges2, carts2, fault);
+}
+function calculateRepairPriorities(nodes2, edges2, carts2, faults2) {
+  return calculateRepairPriorities$1(nodes2, edges2, carts2, faults2);
+}
+function compareFaultScenarios(nodes2, edges2, carts2, faults2) {
+  return compareFaultScenarios$1(nodes2, edges2, carts2, faults2);
+}
+function getActiveFaultsAtTime(faults2, time) {
+  return getActiveFaultsAtTime$1(faults2, time);
+}
+function generateAllEmergencyDetours(nodes2, edges2, carts2, faults2) {
+  return generateAllEmergencyDetours$1(nodes2, edges2, carts2, faults2);
+}
+function calculateEnhancedComparison(nodes2, edges2, carts2, faults2) {
+  return calculateEnhancedComparison$1(nodes2, edges2, carts2, faults2);
+}
+function generateIntegratedPlayback(nodes2, edges2, carts2, faults2, frameInterval = 0.5) {
+  return generateIntegratedPlayback$1(nodes2, edges2, carts2, faults2, frameInterval);
 }
 const initialNodes = [
   { id: "n1", label: "1", type: "loading", x: 100, y: 200, blocked: false },
