@@ -34,6 +34,10 @@
 	function handleFrameChange(event: CustomEvent<PlaybackFrame>) {
 		playbackFrame = event.detail;
 	}
+
+	function handleFaultFrameChange(event: CustomEvent<PlaybackFrame>) {
+		playbackFrame = event.detail;
+	}
 </script>
 
 <div class="min-h-screen bg-surface-200 flex flex-col">
@@ -94,7 +98,7 @@
 
 		<aside class="w-80 bg-surface-100 border-l border-surface-300 p-4 space-y-4 overflow-y-auto flex-shrink-0">
 			{#if showFaultCenter}
-				<FaultPanel />
+				<FaultPanel on:frameChange={handleFaultFrameChange} />
 
 				<div class="card p-4 space-y-2">
 					<h3 class="text-lg font-bold text-primary-900">故障图例</h3>

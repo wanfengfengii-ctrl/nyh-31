@@ -13,10 +13,18 @@ import type {
 	FaultComparisonResult,
 	DispatchResult,
 	CartRoute,
-	PathResult
+	PathResult,
+	WaitStrategy,
+	DetourPlan,
+	EmergencyDetourResult,
+	PhaseComparisonData,
+	EnhancedComparisonResult,
+	FaultTimelineEvent,
+	IntegratedPlaybackFrame,
+	PlaybackFrame
 } from './types';
 import { calculateShortestPath } from './pathfinding';
-import { calculateDispatch, buildTimedRoute } from './dispatch';
+import { calculateDispatch, buildTimedRoute, generatePlaybackFrames } from './dispatch';
 
 function createFaultId(): string {
 	return `fault_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -688,4 +696,592 @@ export function getActiveFaultsAtTime(faults: Fault[], time: number): Fault[] {
 			...f,
 			status: getFaultStatusAtTime(f, time)
 		}));
+}
+
+function getCartPositionAtTime(
+	route: CartRoute,
+	time: number,
+	nodes: MineNode[]
+): {
+	nodeId: string;
+	edgeId: string | null;
+	progress: number;
+	isWaiting: boolean;
+	x: number;
+	y: number;
+} {
+	const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+
+	if (!route.hasPath || route.positions.length === 0) {
+		const firstNode = nodes[0];
+		return {
+			nodeId: firstNode?.id || '',
+			edgeId: null,
+			progress: 0,
+			isWaiting: true,
+			x: firstNode?.x || 0,
+			y: firstNode?.y || 0
+		};
+	}
+
+	if (time < route.positions[0].departureTime) {
+		const node = nodeMap.get(route.positions[0].nodeId);
+		return {
+			nodeId: route.positions[0].nodeId,
+			edgeId: null,
+			progress: 0,
+			isWaiting: true,
+			x: node?.x || 0,
+			y: node?.y || 0
+		};
+	}
+
+	for (let i = 0; i < route.positions.length; i++) {
+		const pos = route.positions[i];
+
+		if (time >= pos.arrivalTime && time < pos.departureTime) {
+			const node = nodeMap.get(pos.nodeId);
+			return {
+				nodeId: pos.nodeId,
+				edgeId: null,
+				progress: 0,
+				isWaiting: true,
+				x: node?.x || 0,
+				y: node?.y || 0
+			};
+		}
+
+		if (i < route.positions.length - 1) {
+			const nextPos = route.positions[i + 1];
+			if (time >= pos.departureTime && time < nextPos.arrivalTime) {
+				const currNode = nodeMap.get(pos.nodeId);
+				const nextNode = nodeMap.get(nextPos.nodeId);
+				const segmentDuration = nextPos.arrivalTime - pos.departureTime;
+				const progress = segmentDuration > 0
+					? (time - pos.departureTime) / segmentDuration
+					: 0;
+
+				return {
+					nodeId: pos.nodeId,
+					edgeId: nextPos.edgeId || null,
+					progress: Math.max(0, Math.min(1, progress)),
+					isWaiting: false,
+					x: currNode && nextNode
+						? currNode.x + (nextNode.x - currNode.x) * progress
+						: currNode?.x || 0,
+					y: currNode && nextNode
+						? currNode.y + (nextNode.y - currNode.y) * progress
+						: currNode?.y || 0
+				};
+			}
+		}
+	}
+
+	const lastPos = route.positions[route.positions.length - 1];
+	const lastNode = nodeMap.get(lastPos.nodeId);
+	return {
+		nodeId: lastPos.nodeId,
+		edgeId: null,
+		progress: 1,
+		isWaiting: false,
+		x: lastNode?.x || 0,
+		y: lastNode?.y || 0
+	};
+}
+
+export function isCartAffectedByFault(
+	cart: Cart,
+	fault: Fault,
+	nodes: MineNode[],
+	edges: MineEdge[]
+): boolean {
+	const route = buildTimedRoute(nodes, edges, cart);
+	if (!route.hasPath) return true;
+
+	if (fault.targetType === 'edge') {
+		return route.positions.some((p) => p.edgeId === fault.targetId);
+	} else {
+		return route.positions.some((p) => p.nodeId === fault.targetId);
+	}
+}
+
+export function generateEmergencyDetour(
+	nodes: MineNode[],
+	edges: MineEdge[],
+	carts: Cart[],
+	fault: Fault
+): EmergencyDetourResult {
+	const detourPlans: DetourPlan[] = [];
+	let totalFeasible = 0;
+	let totalDelay = 0;
+
+	const { nodes: faultNodes, edges: faultEdges } = applyFaultsToNetwork(
+		nodes,
+		edges,
+		[fault],
+		fault.occurrenceTime
+	);
+
+	carts.forEach((cart) => {
+		const originalRoute = buildTimedRoute(nodes, edges, cart);
+		const faultRoute = buildTimedRoute(faultNodes, faultEdges, cart);
+
+		if (!originalRoute.hasPath) return;
+
+		const isAffected =
+			!faultRoute.hasPath ||
+			faultRoute.totalTime > originalRoute.totalTime * 1.05;
+
+		if (!isAffected) return;
+
+		const alternativePath = calculateShortestPath(
+			faultNodes,
+			faultEdges,
+			cart.sourceId,
+			cart.targetId
+		);
+
+		let waitStrategy: WaitStrategy = 'hold_at_node';
+		let waitNodeId: string | undefined;
+		let waitDuration = 0;
+		let feasible = alternativePath.hasPath;
+		let reason: string | undefined;
+
+		if (alternativePath.hasPath) {
+			const delayTime = alternativePath.totalDistance / cart.speed - originalRoute.totalTime;
+
+			if (delayTime <= 0) {
+				waitStrategy = 'reroute_immediately';
+			} else if (delayTime > originalRoute.totalTime * 0.3) {
+				waitStrategy = 'wait_then_reroute';
+				waitNodeId = originalRoute.positions[0]?.nodeId;
+				waitDuration = fault.repairDuration * 0.3;
+			} else {
+				waitStrategy = 'reroute_immediately';
+			}
+
+			totalFeasible++;
+			totalDelay += Math.max(0, delayTime);
+		} else {
+			waitStrategy = 'hold_at_node';
+			const nearestSafeNode = findNearestSafeNode(
+				cart,
+				originalRoute,
+				fault,
+				nodes
+			);
+			waitNodeId = nearestSafeNode;
+			waitDuration = fault.repairDuration;
+			feasible = false;
+			reason = '无可用替代路线，需等待故障修复';
+			totalDelay += fault.repairDuration;
+		}
+
+		detourPlans.push({
+			cartId: cart.id,
+			cartName: cart.name,
+			cartColor: cart.color,
+			originalRoute: originalRoute.positions.map((p) => p.nodeId),
+			detourRoute: alternativePath.hasPath
+				? alternativePath.nodes
+				: originalRoute.positions.map((p) => p.nodeId),
+			originalTotalTime: originalRoute.totalTime,
+			detourTotalTime: alternativePath.hasPath
+				? alternativePath.totalDistance / cart.speed
+				: originalRoute.totalTime + fault.repairDuration,
+			delayTime: alternativePath.hasPath
+				? Math.max(0, alternativePath.totalDistance / cart.speed - originalRoute.totalTime)
+				: fault.repairDuration,
+			additionalDistance: alternativePath.hasPath
+				? alternativePath.totalDistance - originalRoute.totalDistance
+				: 0,
+			waitStrategy,
+			waitNodeId,
+			waitDuration,
+			feasible,
+			reason
+		});
+	});
+
+	const recommendation = generateDetourRecommendation(detourPlans, fault);
+
+	return {
+		faultId: fault.id,
+		faultName: fault.faultTypeName,
+		detourPlans,
+		totalAffectedCarts: detourPlans.length,
+		totalFeasibleDetours: totalFeasible,
+		totalDelayEstimate: totalDelay,
+		recommendation
+	};
+}
+
+function findNearestSafeNode(
+	cart: Cart,
+	originalRoute: CartRoute,
+	fault: Fault,
+	nodes: MineNode[]
+): string | undefined {
+	if (originalRoute.positions.length === 0) return undefined;
+
+	const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+
+	for (const pos of originalRoute.positions) {
+		if (fault.targetType === 'node' && pos.nodeId === fault.targetId) {
+			break;
+		}
+		if (fault.targetType === 'edge' && pos.edgeId === fault.targetId) {
+			break;
+		}
+		const node = nodeMap.get(pos.nodeId);
+		if (node && !node.blocked) {
+			return pos.nodeId;
+		}
+	}
+
+	return originalRoute.positions[0]?.nodeId;
+}
+
+function generateDetourRecommendation(
+	detourPlans: DetourPlan[],
+	fault: Fault
+): string {
+	const infeasibleCount = detourPlans.filter((d) => !d.feasible).length;
+	const highDelayCount = detourPlans.filter((d) => d.delayTime > 20).length;
+
+	if (infeasibleCount > 0) {
+		return `紧急：${infeasibleCount} 辆车无替代路线，需优先抢修 ${fault.targetLabel} 处的 ${fault.faultTypeName}`;
+	} else if (highDelayCount > 0) {
+		return `注意：${highDelayCount} 辆车绕行延误较大，建议协调抢修顺序以减少总等待时间`;
+	} else if (detourPlans.length > 0) {
+		return `情况可控：所有受影响车辆均有替代路线，建议按正常流程抢修`;
+	}
+	return '暂无车辆受影响';
+}
+
+export function generateAllEmergencyDetours(
+	nodes: MineNode[],
+	edges: MineEdge[],
+	carts: Cart[],
+	faults: Fault[]
+): EmergencyDetourResult[] {
+	return faults.map((fault) => generateEmergencyDetour(nodes, edges, carts, fault));
+}
+
+export function calculateEnhancedComparison(
+	nodes: MineNode[],
+	edges: MineEdge[],
+	carts: Cart[],
+	faults: Fault[]
+): EnhancedComparisonResult {
+	const beforeResult = calculateDispatch(nodes, edges, carts);
+
+	const { nodes: faultNodes, edges: faultEdges } = applyFaultsToNetwork(
+		nodes,
+		edges,
+		faults,
+		Math.max(...faults.map((f) => f.occurrenceTime)) + 1
+	);
+	const duringResult = calculateDispatch(faultNodes, faultEdges, carts);
+
+	const repairedFaults = faults.map((f) => ({ ...f, status: 'resolved' as const }));
+	const { nodes: repairedNodes, edges: repairedEdges } = applyFaultsToNetwork(
+		nodes,
+		edges,
+		repairedFaults,
+		Infinity
+	);
+	const afterResult = calculateDispatch(repairedNodes, repairedEdges, carts);
+
+	const beforeData: PhaseComparisonData = {
+		phase: 'before',
+		totalTime: beforeResult.totalTime,
+		totalDistance: beforeResult.totalDistance,
+		congestionRisk: beforeResult.congestionRisk,
+		hasAllPaths: beforeResult.hasAllPaths,
+		avgSpeed: beforeResult.totalTime > 0
+			? beforeResult.totalDistance / beforeResult.totalTime
+			: 0,
+		totalWaitTime: beforeResult.routes.reduce((sum, r) => sum + r.waitTime, 0),
+		routeCount: beforeResult.routes.filter((r) => r.hasPath).length,
+		routes: beforeResult.routes
+	};
+
+	const duringData: PhaseComparisonData = {
+		phase: 'during',
+		totalTime: duringResult.totalTime,
+		totalDistance: duringResult.totalDistance,
+		congestionRisk: duringResult.congestionRisk,
+		hasAllPaths: duringResult.hasAllPaths,
+		avgSpeed: duringResult.totalTime > 0
+			? duringResult.totalDistance / duringResult.totalTime
+			: 0,
+		totalWaitTime: duringResult.routes.reduce((sum, r) => sum + r.waitTime, 0),
+		routeCount: duringResult.routes.filter((r) => r.hasPath).length,
+		routes: duringResult.routes
+	};
+
+	const afterData: PhaseComparisonData = {
+		phase: 'after',
+		totalTime: afterResult.totalTime,
+		totalDistance: afterResult.totalDistance,
+		congestionRisk: afterResult.congestionRisk,
+		hasAllPaths: afterResult.hasAllPaths,
+		avgSpeed: afterResult.totalTime > 0
+			? afterResult.totalDistance / afterResult.totalTime
+			: 0,
+		totalWaitTime: afterResult.routes.reduce((sum, r) => sum + r.waitTime, 0),
+		routeCount: afterResult.routes.filter((r) => r.hasPath).length,
+		routes: afterResult.routes
+	};
+
+	const affectedCount = beforeResult.routes.filter((br) => {
+		const dr = duringResult.routes.find((r) => r.cartId === br.cartId);
+		if (!dr) return true;
+		if (!dr.hasPath && br.hasPath) return true;
+		if (dr.totalTime > br.totalTime * 1.1) return true;
+		return false;
+	}).length;
+
+	const recoveredCount = duringResult.routes.filter((dr) => {
+		const ar = afterResult.routes.find((r) => r.cartId === dr.cartId);
+		const br = beforeResult.routes.find((r) => r.cartId === dr.cartId);
+		if (!ar || !br) return false;
+		if (ar.hasPath && !dr.hasPath) return true;
+		if (ar.totalTime <= br.totalTime * 1.05 && dr.totalTime > br.totalTime * 1.1) return true;
+		return false;
+	}).length;
+
+	const recoveryRate = beforeData.totalTime > 0 && duringData.totalTime > beforeData.totalTime
+		? ((duringData.totalTime - afterData.totalTime) / (duringData.totalTime - beforeData.totalTime)) * 100
+		: 100;
+
+	return {
+		beforeFault: beforeData,
+		duringFault: duringData,
+		afterRepair: afterData,
+		deltaTime: duringData.totalTime - beforeData.totalTime,
+		deltaDistance: duringData.totalDistance - beforeData.totalDistance,
+		deltaCongestion: duringData.congestionRisk - beforeData.congestionRisk,
+		recoveryRate: Math.max(0, Math.min(100, recoveryRate)),
+		affectedCartCount: affectedCount,
+		recoveredCartCount: recoveredCount
+	};
+}
+
+export function generateIntegratedPlayback(
+	nodes: MineNode[],
+	edges: MineEdge[],
+	carts: Cart[],
+	faults: Fault[],
+	frameInterval: number = 0.5
+): IntegratedPlaybackFrame[] {
+	const frames: IntegratedPlaybackFrame[] = [];
+
+	if (carts.length === 0 && faults.length === 0) return frames;
+
+	const normalResult = calculateDispatch(nodes, edges, carts);
+	const normalFrames = generatePlaybackFrames(nodes, edges, carts, normalResult, frameInterval);
+
+	const faultTimeEvents = new Map<number, { type: string; faultId: string }[]>();
+
+	faults.forEach((fault) => {
+		if (!faultTimeEvents.has(fault.occurrenceTime)) {
+			faultTimeEvents.set(fault.occurrenceTime, []);
+		}
+		faultTimeEvents.get(fault.occurrenceTime)!.push({
+			type: 'fault-occur',
+			faultId: fault.id
+		});
+
+		const repairStartTime = fault.repairStartTime ?? fault.occurrenceTime + 5;
+		if (!faultTimeEvents.has(repairStartTime)) {
+			faultTimeEvents.set(repairStartTime, []);
+		}
+		faultTimeEvents.get(repairStartTime)!.push({
+			type: 'repair-start',
+			faultId: fault.id
+		});
+
+		const repairEndTime = repairStartTime + fault.repairDuration;
+		if (!faultTimeEvents.has(repairEndTime)) {
+			faultTimeEvents.set(repairEndTime, []);
+		}
+		faultTimeEvents.get(repairEndTime)!.push({
+			type: 'repair-complete',
+			faultId: fault.id
+		});
+	});
+
+	const allEventTimes = Array.from(faultTimeEvents.keys()).sort((a, b) => a - b);
+	const maxNormalTime = normalFrames.length > 0
+		? normalFrames[normalFrames.length - 1].time
+		: 50;
+	const maxFaultTime = allEventTimes.length > 0
+		? allEventTimes[allEventTimes.length - 1] + 10
+		: 0;
+	const totalDuration = Math.max(maxNormalTime, maxFaultTime, 50);
+
+	const occurredFaults = new Set<string>();
+	const repairingFaults = new Set<string>();
+	const resolvedFaults = new Set<string>();
+	const triggeredEvents = new Set<string>();
+
+	let eventIndex = 0;
+	let dispatchCache: { time: number; result: DispatchResult } | null = null;
+
+	for (let time = 0; time <= totalDuration + frameInterval; time += frameInterval) {
+		const frameEvents: FaultTimelineEvent[] = [];
+
+		while (eventIndex < allEventTimes.length && allEventTimes[eventIndex] <= time) {
+			const eventTime = allEventTimes[eventIndex];
+			const events = faultTimeEvents.get(eventTime) || [];
+
+			events.forEach((event) => {
+				const fault = faults.find((f) => f.id === event.faultId);
+				if (!fault) return;
+
+				if (event.type === 'fault-occur') {
+					occurredFaults.add(fault.id);
+					frameEvents.push({
+						time: eventTime,
+						type: 'fault-occur',
+						faultId: fault.id,
+						faultName: fault.faultTypeName,
+						description: `⚠ 故障发生: ${fault.faultTypeName} - ${fault.targetLabel}`,
+						severity: fault.severity === 'critical'
+							? 'high'
+							: fault.severity === 'major'
+								? 'medium'
+								: 'low'
+					});
+				} else if (event.type === 'repair-start') {
+					repairingFaults.add(fault.id);
+					frameEvents.push({
+						time: eventTime,
+						type: 'repair-start',
+						faultId: fault.id,
+						faultName: fault.faultTypeName,
+						description: `🔧 开始抢修: ${fault.faultTypeName} - ${fault.targetLabel}`,
+						severity: 'medium'
+					});
+				} else if (event.type === 'repair-complete') {
+					resolvedFaults.add(fault.id);
+					repairingFaults.delete(fault.id);
+					frameEvents.push({
+						time: eventTime,
+						type: 'repair-complete',
+						faultId: fault.id,
+						faultName: fault.faultTypeName,
+						description: `✓ 修复完成: ${fault.faultTypeName} - ${fault.targetLabel}`,
+						severity: 'low'
+					});
+				}
+			});
+
+			eventIndex++;
+		}
+
+		let phase: IntegratedPlaybackFrame['phase'] = 'normal';
+
+		if (occurredFaults.size === 0) {
+			phase = 'normal';
+		} else if (resolvedFaults.size === faults.length) {
+			phase = 'recovered';
+		} else if (repairingFaults.size > 0) {
+			phase = 'repairing';
+		} else if (frameEvents.some((e) => e.type === 'fault-occur')) {
+			phase = 'fault-occurring';
+		} else {
+			phase = 'fault-active';
+		}
+
+		const activeFaultsForFrame = faults.filter(
+			(f) => occurredFaults.has(f.id) && !resolvedFaults.has(f.id)
+		);
+
+		const { nodes: frameNodes, edges: frameEdges } = applyFaultsToNetwork(
+			nodes,
+			edges,
+			activeFaultsForFrame,
+			time
+		);
+
+		if (!dispatchCache || Math.abs(dispatchCache.time - time) > frameInterval * 2 ||
+			frameEvents.some((e) => e.type === 'fault-occur' || e.type === 'repair-complete')) {
+			const dispatchResult = calculateDispatch(frameNodes, frameEdges, carts);
+			dispatchCache = { time, result: dispatchResult };
+		}
+
+		const currentDispatch = dispatchCache.result;
+		const cartFrames = generatePlaybackFrames(
+			frameNodes,
+			frameEdges,
+			carts,
+			currentDispatch,
+			frameInterval
+		);
+
+		let cartStates: IntegratedPlaybackFrame['cartStates'] = [];
+		let congestedEdges: IntegratedPlaybackFrame['congestedEdges'] = [];
+
+		if (cartFrames.length > 0) {
+			const closestIdx = Math.min(
+				Math.floor(time / frameInterval),
+				cartFrames.length - 1
+			);
+			const cartFrame = cartFrames[Math.max(0, closestIdx)];
+			if (cartFrame) {
+				cartStates = cartFrame.cartStates;
+				congestedEdges = cartFrame.congestedEdges;
+			}
+		}
+
+		const repairProgress = faults
+			.filter((f) => repairingFaults.has(f.id))
+			.map((f) => {
+				const repairStart = f.repairStartTime ?? f.occurrenceTime + 5;
+				const elapsed = time - repairStart;
+				const progress = Math.max(0, Math.min(1, elapsed / f.repairDuration));
+				const remaining = Math.max(0, f.repairDuration - elapsed);
+				return {
+					faultId: f.id,
+					progress,
+					remainingTime: remaining
+				};
+			});
+
+		if (congestedEdges.length > 0) {
+			const heavyCongestion = congestedEdges.filter((c) => c.level >= 3);
+			if (heavyCongestion.length > 0) {
+				const key = `congestion_${time.toFixed(1)}`;
+				if (!triggeredEvents.has(key)) {
+					triggeredEvents.add(key);
+					frameEvents.push({
+						time,
+						type: 'congestion-warning',
+						description: `⚠ 拥堵警告: ${heavyCongestion.length} 条轨道严重拥堵`,
+						severity: 'medium'
+					});
+				}
+			}
+		}
+
+		frames.push({
+			time,
+			phase,
+			cartStates,
+			congestedEdges,
+			activeFaultIds: Array.from(occurredFaults).filter((id) => !resolvedFaults.has(id)),
+			repairingFaultIds: Array.from(repairingFaults),
+			resolvedFaultIds: Array.from(resolvedFaults),
+			repairProgress,
+			events: frameEvents,
+			nodes: frameNodes,
+			edges: frameEdges,
+			dispatchResultSnapshot: currentDispatch
+		});
+	}
+
+	return frames;
 }

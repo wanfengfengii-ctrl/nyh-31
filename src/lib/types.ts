@@ -211,3 +211,82 @@ export interface FaultPlaybackState {
 	resolvedFaultIds: string[];
 	phase: 'normal' | 'fault-occurring' | 'fault-active' | 'repairing' | 'recovered';
 }
+
+export type WaitStrategy = 'hold_at_node' | 'reroute_immediately' | 'wait_then_reroute';
+
+export interface DetourPlan {
+	cartId: string;
+	cartName: string;
+	cartColor: string;
+	originalRoute: string[];
+	detourRoute: string[];
+	originalTotalTime: number;
+	detourTotalTime: number;
+	delayTime: number;
+	additionalDistance: number;
+	waitStrategy: WaitStrategy;
+	waitNodeId?: string;
+	waitDuration: number;
+	feasible: boolean;
+	reason?: string;
+}
+
+export interface EmergencyDetourResult {
+	faultId: string;
+	faultName: string;
+	detourPlans: DetourPlan[];
+	totalAffectedCarts: number;
+	totalFeasibleDetours: number;
+	totalDelayEstimate: number;
+	recommendation: string;
+}
+
+export interface PhaseComparisonData {
+	phase: 'before' | 'during' | 'after';
+	totalTime: number;
+	totalDistance: number;
+	congestionRisk: number;
+	hasAllPaths: boolean;
+	avgSpeed: number;
+	totalWaitTime: number;
+	routeCount: number;
+	routes: CartRoute[];
+}
+
+export interface EnhancedComparisonResult {
+	beforeFault: PhaseComparisonData;
+	duringFault: PhaseComparisonData;
+	afterRepair: PhaseComparisonData;
+	deltaTime: number;
+	deltaDistance: number;
+	deltaCongestion: number;
+	recoveryRate: number;
+	affectedCartCount: number;
+	recoveredCartCount: number;
+}
+
+export interface FaultTimelineEvent {
+	time: number;
+	type: 'fault-occur' | 'repair-start' | 'repair-complete' | 'reroute' | 'congestion-warning' | 'cart-arrive' | 'cart-depart';
+	faultId?: string;
+	faultName?: string;
+	cartId?: string;
+	cartName?: string;
+	description: string;
+	severity?: 'low' | 'medium' | 'high';
+}
+
+export interface IntegratedPlaybackFrame {
+	time: number;
+	phase: 'normal' | 'fault-occurring' | 'fault-active' | 'repairing' | 'recovered';
+	cartStates: PlaybackFrame['cartStates'];
+	congestedEdges: { edgeId: string; level: number }[];
+	activeFaultIds: string[];
+	repairingFaultIds: string[];
+	resolvedFaultIds: string[];
+	repairProgress: { faultId: string; progress: number; remainingTime: number }[];
+	events: FaultTimelineEvent[];
+	nodes: MineNode[];
+	edges: MineEdge[];
+	dispatchResultSnapshot?: DispatchResult;
+}

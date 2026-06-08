@@ -13,7 +13,10 @@ import type {
 	FaultTargetType,
 	FaultImpactResult,
 	RepairPriorityItem,
-	FaultComparisonResult
+	FaultComparisonResult,
+	EmergencyDetourResult,
+	EnhancedComparisonResult,
+	IntegratedPlaybackFrame
 } from './types';
 import { calculateShortestPath } from './pathfinding';
 import { calculateDispatch, getDefaultCarts, createNewCart } from './dispatch';
@@ -25,7 +28,11 @@ import {
 	defaultFaultTypes,
 	getFaultTypesByTarget,
 	applyFaultsToNetwork,
-	getActiveFaultsAtTime
+	getActiveFaultsAtTime,
+	generateEmergencyDetour,
+	generateAllEmergencyDetours,
+	calculateEnhancedComparison,
+	generateIntegratedPlayback
 } from './faultManagement';
 
 function createNodeId(): string {
@@ -322,6 +329,30 @@ export const faultComparisonResult = derived(
 	([$nodes, $edges, $carts, $faults]) => {
 		if ($faults.length === 0 || $carts.length === 0) return null;
 		return compareFaultScenarios($nodes, $edges, $carts, $faults);
+	}
+);
+
+export const emergencyDetourResults = derived(
+	[nodes, edges, carts, faults],
+	([$nodes, $edges, $carts, $faults]) => {
+		if ($faults.length === 0 || $carts.length === 0) return [];
+		return generateAllEmergencyDetours($nodes, $edges, $carts, $faults);
+	}
+);
+
+export const enhancedComparisonResult = derived(
+	[nodes, edges, carts, faults],
+	([$nodes, $edges, $carts, $faults]) => {
+		if ($faults.length === 0 || $carts.length === 0) return null;
+		return calculateEnhancedComparison($nodes, $edges, $carts, $faults);
+	}
+);
+
+export const integratedPlaybackFrames = derived(
+	[nodes, edges, carts, faults],
+	([$nodes, $edges, $carts, $faults]) => {
+		if ($carts.length === 0 && $faults.length === 0) return [];
+		return generateIntegratedPlayback($nodes, $edges, $carts, $faults, 0.5);
 	}
 );
 
