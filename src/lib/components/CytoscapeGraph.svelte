@@ -8,14 +8,17 @@
 		edges as edgesStore,
 		selectedNodeId,
 		selectedEdgeId,
-		pathResult
+		pathResult,
+		faults as faultsStore
 	} from '$lib/stores';
 	import type {
 		MineNode,
 		MineEdge,
 		NodeType,
 		PathResult as PathResultType,
-		PlaybackFrame
+		PlaybackFrame,
+		Fault,
+		FaultStatus
 	} from '$lib/types';
 	import { createEventDispatcher } from 'svelte';
 
@@ -45,30 +48,107 @@
 		}
 	}
 
-	function nodesToElements($nodes: MineNode[], $edges: MineEdge[]): ElementDefinition[] {
+	function getFaultSeverityColor(severity: string): string {
+		switch (severity) {
+			case 'critical':
+				return '#dc2626';
+			case 'major':
+				return '#f97316';
+			case 'minor':
+				return '#eab308';
+			default:
+				return '#6b7280';
+		}
+	}
+
+	function getNodeFaultInfo(nodeId: string, $faults: Fault[]): {
+		hasFault: boolean;
+		status: FaultStatus | null;
+		severity: string | null;
+		faultCount: number;
+	} {
+		const nodeFaults = $faults.filter(
+			(f) => f.targetType === 'node' && f.targetId === nodeId && f.status !== 'resolved'
+		);
+		if (nodeFaults.length === 0) {
+			return { hasFault: false, status: null, severity: null, faultCount: 0 };
+		}
+		const highestSeverity = nodeFaults.some((f) => f.severity === 'critical')
+			? 'critical'
+			: nodeFaults.some((f) => f.severity === 'major')
+				? 'major'
+				: 'minor';
+		const status = nodeFaults.some((f) => f.status === 'repairing')
+			? 'repairing'
+			: 'pending';
+		return { hasFault: true, status, severity: highestSeverity, faultCount: nodeFaults.length };
+	}
+
+	function getEdgeFaultInfo(edgeId: string, $faults: Fault[]): {
+		hasFault: boolean;
+		status: FaultStatus | null;
+		severity: string | null;
+		faultCount: number;
+	} {
+		const edgeFaults = $faults.filter(
+			(f) => f.targetType === 'edge' && f.targetId === edgeId && f.status !== 'resolved'
+		);
+		if (edgeFaults.length === 0) {
+			return { hasFault: false, status: null, severity: null, faultCount: 0 };
+		}
+		const highestSeverity = edgeFaults.some((f) => f.severity === 'critical')
+			? 'critical'
+			: edgeFaults.some((f) => f.severity === 'major')
+				? 'major'
+				: 'minor';
+		const status = edgeFaults.some((f) => f.status === 'repairing')
+			? 'repairing'
+			: 'pending';
+		return { hasFault: true, status, severity: highestSeverity, faultCount: edgeFaults.length };
+	}
+
+	function nodesToElements($nodes: MineNode[], $edges: MineEdge[], $faults: Fault[]): ElementDefinition[] {
 		const elements: ElementDefinition[] = [];
 
 		$nodes.forEach((node: MineNode) => {
+			const faultInfo = getNodeFaultInfo(node.id, $faults);
+			const isBlocked = node.blocked || faultInfo.hasFault;
+			let color = getNodeColor(node.type, isBlocked);
+
+			if (faultInfo.hasFault && faultInfo.severity) {
+				color = getFaultSeverityColor(faultInfo.severity);
+			}
+
 			elements.push({
 				data: {
 					id: node.id,
 					label: node.label,
 					type: node.type,
-					blocked: node.blocked,
-					color: getNodeColor(node.type, node.blocked)
+					blocked: isBlocked,
+					hasFault: faultInfo.hasFault,
+					faultStatus: faultInfo.status,
+					faultSeverity: faultInfo.severity,
+					faultCount: faultInfo.faultCount,
+					color
 				},
-				position: { x: node.x, y: node.y }
+				position: { x: node.x, y: node.y },
+				classes: faultInfo.hasFault ? `fault-node fault-${faultInfo.status}` : ''
 			});
 		});
 
 		$edges.forEach((edge: MineEdge) => {
+			const faultInfo = getEdgeFaultInfo(edge.id, $faults);
+
 			let color = '#374151';
 			let width = 3;
 			let lineStyle = 'solid';
 
-			if (!edge.enabled) {
-				color = '#d1d5db';
-				lineStyle = 'dashed';
+			if (!edge.enabled || faultInfo.hasFault) {
+				color = faultInfo.hasFault && faultInfo.severity
+					? getFaultSeverityColor(faultInfo.severity)
+					: '#d1d5db';
+				lineStyle = faultInfo.status === 'repairing' ? 'dotted' : 'dashed';
+				width = faultInfo.hasFault ? 5 : 3;
 			} else if (edge.isSwitch) {
 				color = edge.switchActive ? '#f59e0b' : '#9ca3af';
 				width = 4;
@@ -80,13 +160,17 @@
 					source: edge.source,
 					target: edge.target,
 					length: edge.length,
-					enabled: edge.enabled,
+					enabled: edge.enabled && !faultInfo.hasFault,
 					isSwitch: edge.isSwitch,
 					switchActive: edge.switchActive,
+					hasFault: faultInfo.hasFault,
+					faultStatus: faultInfo.status,
+					faultSeverity: faultInfo.severity,
 					color,
 					width,
 					lineStyle
-				}
+				},
+				classes: faultInfo.hasFault ? `fault-edge fault-${faultInfo.status}` : ''
 			});
 		});
 
@@ -291,6 +375,55 @@
 				'z-index': 9998,
 				opacity: 0.6
 			}
+		},
+		{
+			selector: 'node.fault-node',
+			style: {
+				'border-width': 4,
+				'border-color': '#991b1b',
+				width: 50,
+				height: 50,
+				'z-index': 500
+			}
+		},
+		{
+			selector: 'node.fault-blink',
+			style: {
+				'border-color': '#fecaca',
+				'border-width': 6,
+				width: 56,
+				height: 56
+			}
+		},
+		{
+			selector: 'node.repair-blink',
+			style: {
+				'border-color': '#fde047',
+				'border-width': 5,
+				width: 52,
+				height: 52
+			}
+		},
+		{
+			selector: 'edge.fault-edge',
+			style: {
+				width: 5,
+				'z-index': 400
+			}
+		},
+		{
+			selector: 'edge.fault-blink',
+			style: {
+				width: 7,
+				opacity: 0.7
+			}
+		},
+		{
+			selector: 'edge.repair-blink',
+			style: {
+				width: 6,
+				opacity: 0.8
+			}
 		}
 	];
 
@@ -299,19 +432,50 @@
 	let unsubscribePath: (() => void) | null = null;
 	let unsubscribeSelectedNode: (() => void) | null = null;
 	let unsubscribeSelectedEdge: (() => void) | null = null;
+	let unsubscribeFaults: (() => void) | null = null;
+	let faultAnimationTimer: number | null = null;
+	let faultBlinkState = false;
+
+	function startFaultAnimation() {
+		if (faultAnimationTimer) return;
+		faultAnimationTimer = window.setInterval(() => {
+			faultBlinkState = !faultBlinkState;
+			if (cy) {
+				if (faultBlinkState) {
+					cy.elements('.fault-pending').addClass('fault-blink');
+					cy.elements('.fault-repairing').addClass('repair-blink');
+				} else {
+					cy.elements('.fault-blink').removeClass('fault-blink');
+					cy.elements('.repair-blink').removeClass('repair-blink');
+				}
+			}
+		}, 800);
+	}
+
+	function stopFaultAnimation() {
+		if (faultAnimationTimer) {
+			clearInterval(faultAnimationTimer);
+			faultAnimationTimer = null;
+		}
+	}
 
 	onMount(() => {
 		const initialNodes = get(nodesStore);
 		const initialEdges = get(edgesStore);
+		const initialFaults = get(faultsStore);
 
 		cy = cytoscape({
 			container: cyContainer,
 			style: cyStyles as unknown as cytoscape.StylesheetJson,
-			elements: nodesToElements(initialNodes, initialEdges),
+			elements: nodesToElements(initialNodes, initialEdges, initialFaults),
 			wheelSensitivity: 0.3,
 			minZoom: 0.2,
 			maxZoom: 3
 		});
+
+		if (initialFaults.length > 0) {
+			startFaultAnimation();
+		}
 
 		cy.on('tap', 'node', (evt) => {
 			const nodeId = evt.target.id();
@@ -360,18 +524,31 @@
 			}
 		});
 
-		unsubscribeNodes = nodesStore.subscribe(($nodes: MineNode[]) => {
-			if (!cy) return;
-			const $edges = get(edgesStore);
-			cy.elements().remove();
-			cy.add(nodesToElements($nodes, $edges));
-		});
-
-		unsubscribeEdges = edgesStore.subscribe(($edges: MineEdge[]) => {
+		function refreshElements() {
 			if (!cy) return;
 			const $nodes = get(nodesStore);
+			const $edges = get(edgesStore);
+			const $faults = get(faultsStore);
 			cy.elements().remove();
-			cy.add(nodesToElements($nodes, $edges));
+			cy.add(nodesToElements($nodes, $edges, $faults));
+
+			if ($faults.length > 0) {
+				startFaultAnimation();
+			} else {
+				stopFaultAnimation();
+			}
+		}
+
+		unsubscribeNodes = nodesStore.subscribe(() => {
+			refreshElements();
+		});
+
+		unsubscribeEdges = edgesStore.subscribe(() => {
+			refreshElements();
+		});
+
+		unsubscribeFaults = faultsStore.subscribe(($faults: Fault[]) => {
+			refreshElements();
 		});
 
 		unsubscribePath = pathResult.subscribe(($pathResult: PathResultType) => {
@@ -405,6 +582,9 @@
 		if (unsubscribePath) unsubscribePath();
 		if (unsubscribeSelectedNode) unsubscribeSelectedNode();
 		if (unsubscribeSelectedEdge) unsubscribeSelectedEdge();
+		if (unsubscribeFaults) unsubscribeFaults();
+		stopFaultAnimation();
+		if (waitingAnimationTimer) clearInterval(waitingAnimationTimer);
 		if (cy) cy.destroy();
 		cy = null;
 	});

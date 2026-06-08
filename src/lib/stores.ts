@@ -7,10 +7,25 @@ import type {
 	NodeType,
 	Cart,
 	DispatchResult,
-	DispatchScheme
+	DispatchScheme,
+	Fault,
+	FaultType,
+	FaultTargetType,
+	FaultImpactResult,
+	RepairPriorityItem,
+	FaultComparisonResult
 } from './types';
 import { calculateShortestPath } from './pathfinding';
 import { calculateDispatch, getDefaultCarts, createNewCart } from './dispatch';
+import {
+	createFault,
+	assessFaultImpact,
+	calculateRepairPriorities,
+	compareFaultScenarios,
+	defaultFaultTypes,
+	getFaultTypesByTarget,
+	applyFaultsToNetwork
+} from './faultManagement';
 
 function createNodeId(): string {
 	return `node_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -279,4 +294,116 @@ export function loadDispatchScheme(schemeId: string) {
 
 export function deleteDispatchScheme(schemeId: string) {
 	dispatchSchemes.update((s) => s.filter((scheme) => scheme.id !== schemeId));
+}
+
+export const faults = writable<Fault[]>([]);
+export const selectedFaultId = writable<string | null>(null);
+export const showFaultPanel = writable<boolean>(false);
+
+export const faultImpactResults = derived(
+	[nodes, edges, carts, faults],
+	([$nodes, $edges, $carts, $faults]) => {
+		if ($faults.length === 0 || $carts.length === 0) return [];
+		return $faults.map((fault) => assessFaultImpact($nodes, $edges, $carts, fault));
+	}
+);
+
+export const repairPriorities = derived(
+	[nodes, edges, carts, faults],
+	([$nodes, $edges, $carts, $faults]) => {
+		if ($faults.length === 0 || $carts.length === 0) return [];
+		return calculateRepairPriorities($nodes, $edges, $carts, $faults);
+	}
+);
+
+export const faultComparisonResult = derived(
+	[nodes, edges, carts, faults],
+	([$nodes, $edges, $carts, $faults]) => {
+		if ($faults.length === 0 || $carts.length === 0) return null;
+		return compareFaultScenarios($nodes, $edges, $carts, $faults);
+	}
+);
+
+export const nodesWithFaults = derived([nodes, faults], ([$nodes, $faults]) => {
+	const activeNodeFaults = $faults.filter(
+		(f) => f.targetType === 'node' && f.status !== 'resolved' && f.severity !== 'minor'
+	);
+	if (activeNodeFaults.length === 0) return $nodes;
+
+	return $nodes.map((node) => {
+		const hasFault = activeNodeFaults.some((f) => f.targetId === node.id);
+		return hasFault ? { ...node, blocked: true } : node;
+	});
+});
+
+export const edgesWithFaults = derived([edges, faults], ([$edges, $faults]) => {
+	const activeEdgeFaults = $faults.filter(
+		(f) => f.targetType === 'edge' && f.status !== 'resolved' && f.severity !== 'minor'
+	);
+	if (activeEdgeFaults.length === 0) return $edges;
+
+	return $edges.map((edge) => {
+		const hasFault = activeEdgeFaults.some((f) => f.targetId === edge.id);
+		return hasFault ? { ...edge, enabled: false } : edge;
+	});
+});
+
+export function addFault(
+	targetType: FaultTargetType,
+	targetId: string,
+	targetLabel: string,
+	faultType: FaultType,
+	occurrenceTime: number = 0,
+	customRepairDuration?: number,
+	impactScope: number = 1
+): Fault {
+	const fault = createFault(
+		targetType,
+		targetId,
+		targetLabel,
+		faultType,
+		occurrenceTime,
+		customRepairDuration,
+		impactScope
+	);
+	faults.update((fs) => [...fs, fault]);
+	return fault;
+}
+
+export function updateFault(faultId: string, updates: Partial<Fault>) {
+	faults.update((fs) => fs.map((f) => (f.id === faultId ? { ...f, ...updates } : f)));
+}
+
+export function deleteFault(faultId: string) {
+	faults.update((fs) => fs.filter((f) => f.id !== faultId));
+	selectedFaultId.update((id) => (id === faultId ? null : id));
+}
+
+export function startRepair(faultId: string, startTime?: number) {
+	const $faults = get(faults);
+	const fault = $faults.find((f) => f.id === faultId);
+	if (!fault) return;
+
+	const repairStartTime = startTime ?? fault.occurrenceTime + 5;
+	updateFault(faultId, {
+		status: 'repairing',
+		repairStartTime
+	});
+}
+
+export function resolveFault(faultId: string) {
+	updateFault(faultId, { status: 'resolved' });
+}
+
+export function getAvailableFaultTypes(targetType: FaultTargetType, nodeType?: string): FaultType[] {
+	return getFaultTypesByTarget(targetType, nodeType);
+}
+
+export function getFaultTypeById(faultTypeId: string): FaultType | undefined {
+	return defaultFaultTypes.find((ft) => ft.id === faultTypeId);
+}
+
+export function clearAllFaults() {
+	faults.set([]);
+	selectedFaultId.set(null);
 }

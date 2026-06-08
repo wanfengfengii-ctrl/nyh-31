@@ -129,3 +129,85 @@ export interface DispatchScheme {
 	createdAt: number;
 	updatedAt: number;
 }
+
+export type FaultTargetType = 'node' | 'edge';
+export type FaultSeverity = 'minor' | 'major' | 'critical';
+export type FaultStatus = 'pending' | 'repairing' | 'resolved';
+
+export interface FaultType {
+	id: string;
+	name: string;
+	description: string;
+	severity: FaultSeverity;
+	defaultRepairTime: number;
+}
+
+export interface Fault {
+	id: string;
+	targetType: FaultTargetType;
+	targetId: string;
+	targetLabel: string;
+	faultTypeId: string;
+	faultTypeName: string;
+	description: string;
+	severity: FaultSeverity;
+	occurrenceTime: number;
+	repairDuration: number;
+	repairStartTime: number | null;
+	impactScope: number;
+	status: FaultStatus;
+	priority: number;
+}
+
+export interface AffectedCart {
+	cartId: string;
+	cartName: string;
+	cartColor: string;
+	originalRoute: string[];
+	alternativeRoute: string[] | null;
+	delayTime: number;
+	originalTotalTime: number;
+	newTotalTime: number;
+	hasAlternative: boolean;
+	impactLevel: 'high' | 'medium' | 'low';
+}
+
+export interface FaultImpactResult {
+	faultId: string;
+	faultName: string;
+	affectedCarts: AffectedCart[];
+	totalAffectedCount: number;
+	totalDelayTime: number;
+	hasUnreachableCarts: boolean;
+	alternativeRoutesAvailable: boolean;
+}
+
+export interface RepairPriorityItem {
+	faultId: string;
+	faultName: string;
+	targetLabel: string;
+	severity: FaultSeverity;
+	priority: number;
+	affectedCartCount: number;
+	totalDelayTime: number;
+	repairDuration: number;
+	estimatedRecoveryTime: number;
+}
+
+export interface FaultComparisonResult {
+	beforeFault: DispatchResult | null;
+	afterFault: DispatchResult | null;
+	afterRepair: DispatchResult | null;
+	deltaTotalTime: number;
+	deltaTotalDistance: number;
+	deltaCongestionRisk: number;
+	affectedCartCount: number;
+}
+
+export interface FaultPlaybackState {
+	currentTime: number;
+	faults: Fault[];
+	activeFaultIds: string[];
+	resolvedFaultIds: string[];
+	phase: 'normal' | 'fault-occurring' | 'fault-active' | 'repairing' | 'recovered';
+}

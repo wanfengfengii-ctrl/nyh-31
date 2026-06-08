@@ -143,9 +143,68 @@ function createConflictId() {
 function getEdgeById(edges2, edgeId) {
   return edges2.find((e) => e.id === edgeId);
 }
+function getNodeById(nodes2, nodeId) {
+  return nodes2.find((n) => n.id === nodeId);
+}
 function calculateTravelTime(length, speed) {
   if (speed <= 0) return Infinity;
   return length / speed;
+}
+function buildTimedRoute(nodes2, edges2, cart) {
+  const pathResult2 = calculateShortestPath(nodes2, edges2, cart.sourceId, cart.targetId);
+  if (!pathResult2.hasPath) {
+    return {
+      cartId: cart.id,
+      cartName: cart.name,
+      positions: [],
+      totalDistance: 0,
+      totalTime: 0,
+      switchCount: 0,
+      hasPath: false,
+      waitTime: 0
+    };
+  }
+  const positions = [];
+  let currentTime = cart.departureTime;
+  const sourceNode = getNodeById(nodes2, cart.sourceId);
+  if (sourceNode) {
+    positions.push({
+      nodeId: cart.sourceId,
+      edgeId: null,
+      arrivalTime: currentTime,
+      departureTime: currentTime,
+      isSwitch: sourceNode.type === "switch"
+    });
+  }
+  for (let i = 0; i < pathResult2.edges.length; i++) {
+    const edgeId = pathResult2.edges[i];
+    const edge = getEdgeById(edges2, edgeId);
+    const nextNodeId = pathResult2.nodes[i + 1];
+    const nextNode = getNodeById(nodes2, nextNodeId);
+    if (edge && nextNode) {
+      const travelTime = calculateTravelTime(edge.length, cart.speed);
+      const arrivalTime = currentTime + travelTime;
+      positions.push({
+        nodeId: nextNodeId,
+        edgeId,
+        arrivalTime,
+        departureTime: arrivalTime,
+        isSwitch: nextNode.type === "switch"
+      });
+      currentTime = arrivalTime;
+    }
+  }
+  const totalTime = positions.length > 0 ? positions[positions.length - 1].arrivalTime - cart.departureTime : 0;
+  return {
+    cartId: cart.id,
+    cartName: cart.name,
+    positions,
+    totalDistance: pathResult2.totalDistance,
+    totalTime,
+    switchCount: pathResult2.switchCount,
+    hasPath: true,
+    waitTime: 0
+  };
 }
 function timeOverlap(start1, end1, start2, end2) {
   return start1 < end2 && start2 < end1;
@@ -555,6 +614,199 @@ function calculateDispatch(nodes2, edges2, carts2) {
     hasAllPaths
   };
 }
+function applyFaultsToNetwork(nodes2, edges2, faults2, currentTime = Infinity) {
+  const modifiedNodes = [...nodes2];
+  const modifiedEdges = [...edges2];
+  const activeFaults = faults2.filter((f) => {
+    if (f.status === "resolved") return false;
+    if (f.occurrenceTime > currentTime) return false;
+    if (f.repairStartTime !== null && f.repairStartTime + f.repairDuration <= currentTime)
+      return false;
+    return true;
+  });
+  activeFaults.forEach((fault) => {
+    if (fault.severity === "critical" || fault.severity === "major") {
+      if (fault.targetType === "node") {
+        const nodeIdx = modifiedNodes.findIndex((n) => n.id === fault.targetId);
+        if (nodeIdx !== -1) {
+          modifiedNodes[nodeIdx] = { ...modifiedNodes[nodeIdx], blocked: true };
+        }
+        if (fault.impactScope > 0) {
+          expandImpactToNeighbors(
+            fault.targetId,
+            modifiedNodes,
+            modifiedEdges,
+            fault.impactScope,
+            fault.severity
+          );
+        }
+      } else if (fault.targetType === "edge") {
+        const edgeIdx = modifiedEdges.findIndex((e) => e.id === fault.targetId);
+        if (edgeIdx !== -1) {
+          modifiedEdges[edgeIdx] = { ...modifiedEdges[edgeIdx], enabled: false };
+        }
+      }
+    } else if (fault.severity === "minor") {
+      if (fault.targetType === "edge") {
+        const edgeIdx = modifiedEdges.findIndex((e) => e.id === fault.targetId);
+        if (edgeIdx !== -1) {
+          modifiedEdges[edgeIdx] = {
+            ...modifiedEdges[edgeIdx],
+            length: modifiedEdges[edgeIdx].length * 1.5
+          };
+        }
+      }
+    }
+  });
+  return { nodes: modifiedNodes, edges: modifiedEdges };
+}
+function expandImpactToNeighbors(nodeId, nodes2, edges2, depth, severity) {
+  if (depth <= 0) return;
+  const visited = /* @__PURE__ */ new Set();
+  let currentLevel = [nodeId];
+  for (let d = 0; d < depth && currentLevel.length > 0; d++) {
+    const nextLevel = [];
+    for (const currentNodeId of currentLevel) {
+      if (visited.has(currentNodeId)) continue;
+      visited.add(currentNodeId);
+      const adjacentEdges = edges2.filter(
+        (e) => e.source === currentNodeId || e.target === currentNodeId
+      );
+      for (const edge of adjacentEdges) {
+        const neighborId = edge.source === currentNodeId ? edge.target : edge.source;
+        if (!visited.has(neighborId)) {
+          nextLevel.push(neighborId);
+          if (d === 0 || severity === "critical") {
+            const nodeIdx = nodes2.findIndex((n) => n.id === neighborId);
+            if (nodeIdx !== -1 && !nodes2[nodeIdx].blocked) {
+              nodes2[nodeIdx] = { ...nodes2[nodeIdx], blocked: true };
+            }
+          }
+        }
+      }
+    }
+    currentLevel = nextLevel;
+  }
+}
+function assessFaultImpact(nodes2, edges2, carts2, fault) {
+  const originalRoutes = /* @__PURE__ */ new Map();
+  carts2.forEach((cart) => {
+    const route = buildTimedRoute(nodes2, edges2, cart);
+    originalRoutes.set(cart.id, route);
+  });
+  const { nodes: faultNodes, edges: faultEdges } = applyFaultsToNetwork(
+    nodes2,
+    edges2,
+    [fault],
+    fault.occurrenceTime
+  );
+  const affectedCarts = [];
+  carts2.forEach((cart) => {
+    const originalRoute = originalRoutes.get(cart.id);
+    if (!originalRoute || !originalRoute.hasPath) return;
+    const faultRoute = buildTimedRoute(faultNodes, faultEdges, cart);
+    const isAffected = !faultRoute.hasPath || faultRoute.totalTime > originalRoute.totalTime * 1.05 || faultRoute.totalDistance > originalRoute.totalDistance * 1.05;
+    if (isAffected) {
+      const alternativePathResult = calculateShortestPath(
+        faultNodes,
+        faultEdges,
+        cart.sourceId,
+        cart.targetId
+      );
+      let impactLevel;
+      const delayTime = faultRoute.hasPath ? faultRoute.totalTime - originalRoute.totalTime : Infinity;
+      if (!faultRoute.hasPath) {
+        impactLevel = "high";
+      } else if (delayTime > originalRoute.totalTime * 0.5) {
+        impactLevel = "high";
+      } else if (delayTime > originalRoute.totalTime * 0.2) {
+        impactLevel = "medium";
+      } else {
+        impactLevel = "low";
+      }
+      affectedCarts.push({
+        cartId: cart.id,
+        cartName: cart.name,
+        cartColor: cart.color,
+        originalRoute: originalRoute.positions.map((p) => p.nodeId),
+        alternativeRoute: alternativePathResult.hasPath ? alternativePathResult.nodes : null,
+        delayTime: isFinite(delayTime) ? delayTime : -1,
+        originalTotalTime: originalRoute.totalTime,
+        newTotalTime: faultRoute.hasPath ? faultRoute.totalTime : -1,
+        hasAlternative: alternativePathResult.hasPath,
+        impactLevel
+      });
+    }
+  });
+  const totalDelayTime = affectedCarts.reduce((sum, ac) => {
+    return sum + (ac.delayTime > 0 ? ac.delayTime : 0);
+  }, 0);
+  const hasUnreachableCarts = affectedCarts.some((ac) => !ac.hasAlternative);
+  const alternativeRoutesAvailable = affectedCarts.some((ac) => ac.hasAlternative);
+  return {
+    faultId: fault.id,
+    faultName: fault.faultTypeName,
+    affectedCarts,
+    totalAffectedCount: affectedCarts.length,
+    totalDelayTime,
+    hasUnreachableCarts,
+    alternativeRoutesAvailable
+  };
+}
+function assessMultipleFaultsImpact(nodes2, edges2, carts2, faults2) {
+  return faults2.map((fault) => assessFaultImpact(nodes2, edges2, carts2, fault));
+}
+function calculateRepairPriorities(nodes2, edges2, carts2, faults2) {
+  const impactResults = assessMultipleFaultsImpact(nodes2, edges2, carts2, faults2);
+  const priorityItems = faults2.map((fault) => {
+    const impact = impactResults.find((ir) => ir.faultId === fault.id);
+    const impactScore = impact ? impact.totalAffectedCount * 20 + Math.min(impact.totalDelayTime, 100) * 0.5 + (impact.hasUnreachableCarts ? 50 : 0) : 0;
+    const severityScore = fault.severity === "critical" ? 100 : fault.severity === "major" ? 60 : 30;
+    const totalPriority = severityScore + impactScore + fault.priority;
+    return {
+      faultId: fault.id,
+      faultName: fault.faultTypeName,
+      targetLabel: fault.targetLabel,
+      severity: fault.severity,
+      priority: totalPriority,
+      affectedCartCount: impact?.totalAffectedCount || 0,
+      totalDelayTime: impact?.totalDelayTime || 0,
+      repairDuration: fault.repairDuration,
+      estimatedRecoveryTime: fault.occurrenceTime + fault.repairDuration
+    };
+  });
+  return priorityItems.sort((a, b) => b.priority - a.priority);
+}
+function compareFaultScenarios(nodes2, edges2, carts2, faults2) {
+  const beforeFault = calculateDispatch(nodes2, edges2, carts2);
+  const { nodes: faultNodes, edges: faultEdges } = applyFaultsToNetwork(
+    nodes2,
+    edges2,
+    faults2,
+    Math.max(...faults2.map((f) => f.occurrenceTime)) + 1
+  );
+  const afterFault = calculateDispatch(faultNodes, faultEdges, carts2);
+  const afterRepair = beforeFault;
+  const deltaTotalTime = afterFault.totalTime - beforeFault.totalTime;
+  const deltaTotalDistance = afterFault.totalDistance - beforeFault.totalDistance;
+  const deltaCongestionRisk = afterFault.congestionRisk - beforeFault.congestionRisk;
+  const affectedCartCount = afterFault.routes.filter((r) => {
+    const beforeRoute = beforeFault.routes.find((br) => br.cartId === r.cartId);
+    if (!beforeRoute) return false;
+    if (!r.hasPath && beforeRoute.hasPath) return true;
+    if (r.totalTime > beforeRoute.totalTime * 1.1) return true;
+    return false;
+  }).length;
+  return {
+    beforeFault,
+    afterFault,
+    afterRepair,
+    deltaTotalTime,
+    deltaTotalDistance,
+    deltaCongestionRisk,
+    affectedCartCount
+  };
+}
 const initialNodes = [
   { id: "n1", label: "1", type: "loading", x: 100, y: 200, blocked: false },
   { id: "n2", label: "2", type: "normal", x: 300, y: 200, blocked: false },
@@ -614,6 +866,48 @@ derived(
     return calculateDispatch($nodes, $edges, $carts);
   }
 );
+const faults = writable([]);
+derived(
+  [nodes, edges, carts, faults],
+  ([$nodes, $edges, $carts, $faults]) => {
+    if ($faults.length === 0 || $carts.length === 0) return [];
+    return $faults.map((fault) => assessFaultImpact($nodes, $edges, $carts, fault));
+  }
+);
+derived(
+  [nodes, edges, carts, faults],
+  ([$nodes, $edges, $carts, $faults]) => {
+    if ($faults.length === 0 || $carts.length === 0) return [];
+    return calculateRepairPriorities($nodes, $edges, $carts, $faults);
+  }
+);
+derived(
+  [nodes, edges, carts, faults],
+  ([$nodes, $edges, $carts, $faults]) => {
+    if ($faults.length === 0 || $carts.length === 0) return null;
+    return compareFaultScenarios($nodes, $edges, $carts, $faults);
+  }
+);
+derived([nodes, faults], ([$nodes, $faults]) => {
+  const activeNodeFaults = $faults.filter(
+    (f) => f.targetType === "node" && f.status !== "resolved" && f.severity !== "minor"
+  );
+  if (activeNodeFaults.length === 0) return $nodes;
+  return $nodes.map((node) => {
+    const hasFault = activeNodeFaults.some((f) => f.targetId === node.id);
+    return hasFault ? { ...node, blocked: true } : node;
+  });
+});
+derived([edges, faults], ([$edges, $faults]) => {
+  const activeEdgeFaults = $faults.filter(
+    (f) => f.targetType === "edge" && f.status !== "resolved" && f.severity !== "minor"
+  );
+  if (activeEdgeFaults.length === 0) return $edges;
+  return $edges.map((edge) => {
+    const hasFault = activeEdgeFaults.some((f) => f.targetId === edge.id);
+    return hasFault ? { ...edge, enabled: false } : edge;
+  });
+});
 const CytoscapeGraph = create_ssr_component(($$result, $$props, $$bindings, slots) => {
   let { addMode = null } = $$props;
   let { playbackFrame = null } = $$props;
@@ -885,7 +1179,10 @@ const Page = create_ssr_component(($$result, $$props, $$bindings, slots) => {
     $$rendered = `<div class="min-h-screen bg-surface-200 flex flex-col"><header class="bg-surface-900 text-surface-50 px-6 py-4 shadow-lg flex-shrink-0"><div class="flex items-center justify-between"><div data-svelte-h="svelte-46xya4"><h1 class="text-2xl font-bold text-primary-400">⛏ 老矿洞轨道模拟系统</h1> <p class="text-sm text-surface-400">绘制矿洞轨道 · 计算运输路线 · 分析堵塞风险</p></div> <div class="flex items-center gap-4"><button class="${[
       "btn btn-sm",
       " variant-soft-secondary"
-    ].join(" ").trim()}" data-svelte-h="svelte-1if8gf3">🚚 调度中心</button> <div class="text-sm text-surface-400 text-right" data-svelte-h="svelte-3zxl7i"><p>节点编号不能重复</p> <p>轨道长度必须大于 0</p></div></div></div></header> <div class="flex flex-1 overflow-hidden"><aside class="w-72 bg-surface-100 border-r border-surface-300 p-4 space-y-4 overflow-y-auto flex-shrink-0">${validate_component(ToolPanel, "ToolPanel").$$render(
+    ].join(" ").trim()}" data-svelte-h="svelte-16w996n">🚚 调度中心</button> <button class="${[
+      "btn btn-sm",
+      " variant-soft-secondary"
+    ].join(" ").trim()}" data-svelte-h="svelte-8bw43g">🔧 故障指挥</button> <div class="text-sm text-surface-400 text-right" data-svelte-h="svelte-3zxl7i"><p>节点编号不能重复</p> <p>轨道长度必须大于 0</p></div></div></div></header> <div class="flex flex-1 overflow-hidden"><aside class="w-72 bg-surface-100 border-r border-surface-300 p-4 space-y-4 overflow-y-auto flex-shrink-0">${validate_component(ToolPanel, "ToolPanel").$$render(
       $$result,
       { addMode },
       {
@@ -895,7 +1192,7 @@ const Page = create_ssr_component(($$result, $$props, $$bindings, slots) => {
         }
       },
       {}
-    )} ${validate_component(NodePanel, "NodePanel").$$render($$result, {}, {}, {})} ${validate_component(EdgePanel, "EdgePanel").$$render($$result, {}, {}, {})}</aside> <main class="flex-1 p-4 min-w-0"><div class="w-full h-full bg-white rounded-xl shadow-md overflow-hidden">${validate_component(CytoscapeGraph, "CytoscapeGraph").$$render($$result, { addMode, playbackFrame }, {}, {})}</div></main> <aside class="w-80 bg-surface-100 border-l border-surface-300 p-4 space-y-4 overflow-y-auto flex-shrink-0">${`${validate_component(PathPanel, "PathPanel").$$render($$result, {}, {}, {})} ${validate_component(SchemePanel, "SchemePanel").$$render($$result, {}, {}, {})} <div class="card p-4 space-y-2" data-svelte-h="svelte-cjstnm"><h3 class="text-lg font-bold text-primary-900">图例说明</h3> <div class="space-y-2 text-sm"><div class="flex items-center gap-2"><div class="w-5 h-5 rounded-full bg-green-500 border-2 border-gray-800"></div> <span>装载点</span></div> <div class="flex items-center gap-2"><div class="w-5 h-5 rounded-full bg-blue-500 border-2 border-gray-800"></div> <span>卸载点</span></div> <div class="flex items-center gap-2"><div class="w-5 h-5 rounded-full bg-amber-500 border-2 border-gray-800"></div> <span>岔道节点</span></div> <div class="flex items-center gap-2"><div class="w-5 h-5 rounded-full bg-gray-500 border-2 border-gray-800"></div> <span>普通节点</span></div> <div class="flex items-center gap-2"><div class="w-5 h-5 rounded-full bg-red-500 border-2 border-gray-800"></div> <span>堵塞节点</span></div> <hr class="my-2"> <div class="flex items-center gap-2"><div class="w-8 h-1 bg-gray-700"></div> <span>普通轨道</span></div> <div class="flex items-center gap-2"><div class="w-8 h-1 bg-amber-500"></div> <span>岔道（开启）</span></div> <div class="flex items-center gap-2"><div class="w-8 h-0.5 bg-gray-300 border-t border-dashed"></div> <span>关闭轨道</span></div> <div class="flex items-center gap-2"><div class="w-8 h-1 bg-green-500"></div> <span>最短路径</span></div></div></div>`}</aside></div></div>`;
+    )} ${validate_component(NodePanel, "NodePanel").$$render($$result, {}, {}, {})} ${validate_component(EdgePanel, "EdgePanel").$$render($$result, {}, {}, {})}</aside> <main class="flex-1 p-4 min-w-0"><div class="w-full h-full bg-white rounded-xl shadow-md overflow-hidden">${validate_component(CytoscapeGraph, "CytoscapeGraph").$$render($$result, { addMode, playbackFrame }, {}, {})}</div></main> <aside class="w-80 bg-surface-100 border-l border-surface-300 p-4 space-y-4 overflow-y-auto flex-shrink-0">${`${`${validate_component(PathPanel, "PathPanel").$$render($$result, {}, {}, {})} ${validate_component(SchemePanel, "SchemePanel").$$render($$result, {}, {}, {})} <div class="card p-4 space-y-2" data-svelte-h="svelte-cjstnm"><h3 class="text-lg font-bold text-primary-900">图例说明</h3> <div class="space-y-2 text-sm"><div class="flex items-center gap-2"><div class="w-5 h-5 rounded-full bg-green-500 border-2 border-gray-800"></div> <span>装载点</span></div> <div class="flex items-center gap-2"><div class="w-5 h-5 rounded-full bg-blue-500 border-2 border-gray-800"></div> <span>卸载点</span></div> <div class="flex items-center gap-2"><div class="w-5 h-5 rounded-full bg-amber-500 border-2 border-gray-800"></div> <span>岔道节点</span></div> <div class="flex items-center gap-2"><div class="w-5 h-5 rounded-full bg-gray-500 border-2 border-gray-800"></div> <span>普通节点</span></div> <div class="flex items-center gap-2"><div class="w-5 h-5 rounded-full bg-red-500 border-2 border-gray-800"></div> <span>堵塞节点</span></div> <hr class="my-2"> <div class="flex items-center gap-2"><div class="w-8 h-1 bg-gray-700"></div> <span>普通轨道</span></div> <div class="flex items-center gap-2"><div class="w-8 h-1 bg-amber-500"></div> <span>岔道（开启）</span></div> <div class="flex items-center gap-2"><div class="w-8 h-0.5 bg-gray-300 border-t border-dashed"></div> <span>关闭轨道</span></div> <div class="flex items-center gap-2"><div class="w-8 h-1 bg-green-500"></div> <span>最短路径</span></div></div></div>`}`}</aside></div></div>`;
   } while (!$$settled);
   return $$rendered;
 });

@@ -8,12 +8,14 @@
 	import SchemePanel from '$lib/components/SchemePanel.svelte';
 	import DispatchPanel from '$lib/components/DispatchPanel.svelte';
 	import PlaybackPanel from '$lib/components/PlaybackPanel.svelte';
+	import FaultPanel from '$lib/components/FaultPanel.svelte';
 	import { addNode, addEdge, initDefaultCarts } from '$lib/stores';
 	import type { NodeType, PlaybackFrame } from '$lib/types';
 
 	let addMode: NodeType | 'edge' | null = null;
 	let playbackFrame: PlaybackFrame | null = null;
 	let showDispatchCenter = false;
+	let showFaultCenter = false;
 
 	onMount(() => {
 		initDefaultCarts();
@@ -46,9 +48,23 @@
 					class="btn btn-sm"
 					class:variant-filled-primary={showDispatchCenter}
 					class:variant-soft-secondary={!showDispatchCenter}
-					on:click={() => (showDispatchCenter = !showDispatchCenter)}
+					on:click={() => {
+						showDispatchCenter = !showDispatchCenter;
+						if (showDispatchCenter) showFaultCenter = false;
+					}}
 				>
 					🚚 调度中心
+				</button>
+				<button
+					class="btn btn-sm"
+					class:variant-filled-warning={showFaultCenter}
+					class:variant-soft-secondary={!showFaultCenter}
+					on:click={() => {
+						showFaultCenter = !showFaultCenter;
+						if (showFaultCenter) showDispatchCenter = false;
+					}}
+				>
+					🔧 故障指挥
 				</button>
 				<div class="text-sm text-surface-400 text-right">
 					<p>节点编号不能重复</p>
@@ -77,7 +93,49 @@
 		</main>
 
 		<aside class="w-80 bg-surface-100 border-l border-surface-300 p-4 space-y-4 overflow-y-auto flex-shrink-0">
-			{#if !showDispatchCenter}
+			{#if showFaultCenter}
+				<FaultPanel />
+
+				<div class="card p-4 space-y-2">
+					<h3 class="text-lg font-bold text-primary-900">故障图例</h3>
+					<div class="space-y-2 text-sm">
+						<div class="flex items-center gap-2">
+							<div class="w-5 h-5 rounded-full bg-red-600 border-4 border-red-900"></div>
+							<span>严重故障</span>
+						</div>
+						<div class="flex items-center gap-2">
+							<div class="w-5 h-5 rounded-full bg-orange-500 border-4 border-orange-700"></div>
+							<span>较重故障</span>
+						</div>
+						<div class="flex items-center gap-2">
+							<div class="w-5 h-5 rounded-full bg-yellow-500 border-4 border-yellow-700"></div>
+							<span>轻微故障</span>
+						</div>
+						<hr class="my-2" />
+						<div class="flex items-center gap-2">
+							<div class="w-8 h-1.5 bg-red-600 border-dashed"></div>
+							<span>故障轨道</span>
+						</div>
+						<div class="flex items-center gap-2">
+							<div class="w-8 h-1.5 bg-yellow-500" style="border-style: dotted;"></div>
+							<span>抢修中轨道</span>
+						</div>
+						<hr class="my-2" />
+						<div class="flex items-center gap-2">
+							<span class="text-xs px-2 py-0.5 rounded bg-error-100 text-error-700">待处理</span>
+							<span>故障未开始抢修</span>
+						</div>
+						<div class="flex items-center gap-2">
+							<span class="text-xs px-2 py-0.5 rounded bg-warning-100 text-warning-700">抢修中</span>
+							<span>正在进行修复</span>
+						</div>
+						<div class="flex items-center gap-2">
+							<span class="text-xs px-2 py-0.5 rounded bg-success-100 text-success-700">已修复</span>
+							<span>故障已恢复</span>
+						</div>
+					</div>
+				</div>
+			{:else if !showDispatchCenter}
 				<PathPanel />
 				<SchemePanel />
 
